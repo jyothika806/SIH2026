@@ -1,0 +1,38 @@
+# =============================================================================
+# SafeVoyage Sentinel – Dockerfile for Node.js Express/Vite Gateway
+# Builds the Vite SPA, compiles server.ts, and serves both from port 8080.
+# =============================================================================
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Install deps first (cache-friendly layer)
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=optional
+
+# Copy source and build Vite SPA + compile server.ts
+COPY . .
+RUN npm run build
+RUN npx tsc -p tsconfig.server.json --noEmit false
+
+# ---- Runtime stage ----
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+# Only install production deps
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev --omit=optional
+
+# Copy compiled assets from builder
+COPY --from=builder /app/dist ./dist
+
+ENV NODE_ENV=production
+ENV PORT=8080
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:8080/api/health || exit 1
+
+CMD ["node", "dist/server.js"]

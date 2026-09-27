@@ -1,0 +1,72 @@
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Node.js
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# =========================
+# Build files
+# =========================
+dist/
+build/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# =========================
+# Flutter
+# =========================
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+
+# =========================
+# Android
+# =========================
+.gradle/
+local.properties
+
+# =========================
+# IDE
+# =========================
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# =========================
+# Operating System
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# ML model files
+# =========================
+*.pkl
+*.bin
+*.pt
+*.pth
