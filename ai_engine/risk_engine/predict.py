@@ -17,25 +17,24 @@ import json
 import time
 from typing import Dict, Optional, List
 from datetime import datetime
-from pathlib import Path
-import joblib
 import os
-
-# Import feature engineering pipeline
 import sys
+import joblib
+
+# Ensure local module path resolution
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from feature_engineering import RiskFeaturePipeline
+
+# Import required for unpickling uncertainty estimator
+try:
+    from train_risk_model import ConformalUncertaintyEstimator
+except ImportError:
+    ConformalUncertaintyEstimator = None
 
 
 class UltraFastRiskPredictor:
     """
     Ultra-fast risk predictor using ONNX Runtime for sub-5ms inference.
-    
-    Features:
-    - ONNX Runtime with optimized execution providers
-    - Preallocated tensors for zero-copy inference
-    - Structured JSON response with action protocols
-    - Uncertainty estimation integration
     """
     
     RISK_CLASSES = ['Green', 'Yellow', 'Red']
@@ -68,31 +67,21 @@ class UltraFastRiskPredictor:
     def __init__(
         self,
         onnx_model_path: str,
-        scaler_path: str,
+        pipeline_path: str,
         uncertainty_estimator_path: Optional[str] = None,
         execution_providers: Optional[List[str]] = None
     ):
-        """
-        Initialize the ultra-fast risk predictor.
-        
-        Args:
-            onnx_model_path: Path to ONNX model file
-            scaler_path: Path to feature scaler
-            uncertainty_estimator_path: Path to uncertainty estimator (optional)
-            execution_providers: ONNX Runtime execution providers (e.g., ['CUDAExecutionProvider', 'CPUExecutionProvider'])
-        """
         self.onnx_model_path = onnx_model_path
-        self.scaler_path = scaler_path
+        self.pipeline_path = pipeline_path
         self.uncertainty_estimator_path = uncertainty_estimator_path
         
-        # Set default execution providers
         if execution_providers is None:
             execution_providers = ['CPUExecutionProvider']
         
         print(f"Loading ONNX model from: {onnx_model_path}")
         print(f"Using execution providers: {execution_providers}")
         
-        # Load ONNX model
+        # Load ONNX session
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         so.intra_op_num_threads = 1
@@ -103,19 +92,19 @@ class UltraFastRiskPredictor:
             providers=execution_providers
         )
         
-        # Get input/output info
         self.input_name = self.ort_session.get_inputs()[0].name
         self.input_shape = self.ort_session.get_inputs()[0].shape
         self.output_names = [output.name for output in self.ort_session.get_outputs()]
         
-        print(f"Model loaded successfully")
+        print("Model loaded successfully")
         print(f"Input shape: {self.input_shape}")
         print(f"Output names: {self.output_names}")
         
-        # Load feature pipeline and scaler
-        self.feature_pipeline = RiskFeaturePipeline(scaler_path=scaler_path)
+        # Load feature pipeline directly (fitted scaler included)
+        self.feature_pipeline = joblib.load(pipeline_path)
+        print(f"Feature pipeline loaded from: {pipeline_path}")
         
-        # Load uncertainty estimator if available
+        # Load uncertainty estimator if present
         self.uncertainty_estimator = None
         if uncertainty_estimator_path and os.path.exists(uncertainty_estimator_path):
             self.uncertainty_estimator = joblib.load(uncertainty_estimator_path)
@@ -129,59 +118,27 @@ class UltraFastRiskPredictor:
     
     def predict(
         self,
-        # Temporal inputs
         timestamp: datetime,
-        
-        # Spatial inputs
         road_segment_crime_index: float,
         lighting_density_score: float,
         route_isolation_factor: float,
         distance_from_arterial: float,
-        
-        # Driver behavior inputs
         driver_30day_rating: float,
         driver_7day_rating: float,
         completion_rate: float,
         harsh_braking_frequency: float,
         speeding_frequency: float,
         total_rides_last_30days: int,
-        
-        # Passenger safety inputs
         passenger_verification_level: str,
         passenger_trust_score: float,
         co_passenger_count: int = 0,
         co_passenger_verification_levels: Optional[List[str]] = None
     ) -> Dict:
-        """
-        Perform ultra-fast risk prediction.
-        
-        Args:
-            timestamp: Ride request timestamp
-            road_segment_crime_index: Crime index for road segment
-            lighting_density_score: Lighting infrastructure score
-            route_isolation_factor: Distance from arterial roads
-            distance_from_arterial: Actual distance in meters
-            driver_30day_rating: 30-day average driver rating
-            driver_7day_rating: 7-day average driver rating
-            completion_rate: Driver completion rate
-            harsh_braking_frequency: Harsh braking events per 100km
-            speeding_frequency: Speeding events per 100km
-            total_rides_last_30days: Total rides in last 30 days
-            passenger_verification_level: Primary passenger verification level
-            passenger_trust_score: Passenger trust score
-            co_passenger_count: Number of co-passengers
-            co_passenger_verification_levels: List of co-passenger verification levels
-            
-        Returns:
-            Dictionary with prediction results
-        """
         if co_passenger_verification_levels is None:
             co_passenger_verification_levels = []
         
-        # Start timing
         start_time = time.perf_counter()
         
-        # Extract features
         features = self.feature_pipeline.extract_all_features(
             timestamp=timestamp,
             road_segment_crime_index=road_segment_crime_index,
@@ -200,28 +157,20 @@ class UltraFastRiskPredictor:
             co_passenger_verification_levels=co_passenger_verification_levels
         )
         
-        # Normalize features
         normalized_features = self.feature_pipeline.normalize_features(features, fit=False)
-        
-        # Copy to preallocated tensor (zero-copy)
         self.input_tensor[0, :] = normalized_features.astype(np.float32)
         
-        # Run ONNX inference
         ort_outputs = self.ort_session.run(
             self.output_names,
             {self.input_name: self.input_tensor}
         )
         
-        # Get probabilities
-        probabilities = ort_outputs[0][0]  # Shape: (3,)
-        
-        # Get prediction
+        probabilities = ort_outputs[0][0]
         predicted_class_idx = int(np.argmax(probabilities))
         risk_level = self.RISK_CLASSES[predicted_class_idx]
         risk_code = self.RISK_CODES[predicted_class_idx]
         confidence_score = float(probabilities[predicted_class_idx])
         
-        # Calculate uncertainty
         uncertainty_flag = False
         uncertainty_metrics = {}
         
@@ -229,7 +178,6 @@ class UltraFastRiskPredictor:
             uncertainty_metrics = self.uncertainty_estimator.predict_uncertainty(probabilities)
             uncertainty_flag = uncertainty_metrics['uncertainty_flag']
         else:
-            # Fallback: calculate entropy directly
             eps = 1e-10
             clipped_probs = np.clip(probabilities, eps, 1 - eps)
             entropy = -np.sum(clipped_probs * np.log(clipped_probs))
@@ -240,10 +188,8 @@ class UltraFastRiskPredictor:
                 'threshold': 0.45
             }
         
-        # Get action protocol
         action_protocol = self.ACTION_PROTOCOLS[risk_level].copy()
         
-        # Apply uncertainty escalation
         if uncertainty_flag and risk_level == 'Green':
             risk_level = 'Yellow'
             risk_code = 1
@@ -255,12 +201,10 @@ class UltraFastRiskPredictor:
             action_protocol = self.ACTION_PROTOCOLS['Red'].copy()
             action_protocol['escalation_reason'] = 'High uncertainty'
         
-        # End timing
         end_time = time.perf_counter()
         inference_time_ms = (end_time - start_time) * 1000
         
-        # Build response
-        response = {
+        return {
             'risk_level': risk_level,
             'risk_code': risk_code,
             'confidence_score': confidence_score,
@@ -280,62 +224,10 @@ class UltraFastRiskPredictor:
                 'composite_risk_interaction': features.get('composite_risk_interaction', 0.0)
             }
         }
-        
-        return response
-    
-    def predict_batch(
-        self,
-        batch_data: List[Dict]
-    ) -> List[Dict]:
-        """
-        Perform batch prediction for multiple requests.
-        
-        Args:
-            batch_data: List of dictionaries containing input data for each prediction
-            
-        Returns:
-            List of prediction results
-        """
-        results = []
-        
-        for data in batch_data:
-            result = self.predict(
-                timestamp=data['timestamp'],
-                road_segment_crime_index=data['road_segment_crime_index'],
-                lighting_density_score=data['lighting_density_score'],
-                route_isolation_factor=data['route_isolation_factor'],
-                distance_from_arterial=data['distance_from_arterial'],
-                driver_30day_rating=data['driver_30day_rating'],
-                driver_7day_rating=data['driver_7day_rating'],
-                completion_rate=data['completion_rate'],
-                harsh_braking_frequency=data['harsh_braking_frequency'],
-                speeding_frequency=data['speeding_frequency'],
-                total_rides_last_30days=data['total_rides_last_30days'],
-                passenger_verification_level=data['passenger_verification_level'],
-                passenger_trust_score=data['passenger_trust_score'],
-                co_passenger_count=data.get('co_passenger_count', 0),
-                co_passenger_verification_levels=data.get('co_passenger_verification_levels', [])
-            )
-            results.append(result)
-        
-        return results
-    
-    def benchmark_latency(
-        self,
-        n_iterations: int = 1000
-    ) -> Dict[str, float]:
-        """
-        Benchmark inference latency.
-        
-        Args:
-            n_iterations: Number of iterations for benchmarking
-            
-        Returns:
-            Dictionary with latency metrics
-        """
+
+    def benchmark_latency(self, n_iterations: int = 1000) -> Dict[str, float]:
         print(f"Benchmarking inference latency ({n_iterations} iterations)...")
         
-        # Create sample input
         sample_input = {
             'timestamp': datetime.now(),
             'road_segment_crime_index': 0.5,
@@ -354,17 +246,15 @@ class UltraFastRiskPredictor:
             'co_passenger_verification_levels': []
         }
         
-        # Warm-up
         for _ in range(10):
             _ = self.predict(**sample_input)
         
-        # Benchmark
         latencies = []
         for _ in range(n_iterations):
             start_time = time.perf_counter()
             _ = self.predict(**sample_input)
             end_time = time.perf_counter()
-            latencies.append((end_time - start_time) * 1000)  # Convert to ms
+            latencies.append((end_time - start_time) * 1000)
         
         latencies = np.array(latencies)
         
@@ -386,56 +276,37 @@ class UltraFastRiskPredictor:
         return latency_metrics
 
 
-def load_predictor(
-    models_dir: str = "ai_engine/models",
-    model_name: str = "risk_engine"
-) -> UltraFastRiskPredictor:
-    """
-    Load the ultra-fast risk predictor with default paths.
-    
-    Args:
-        models_dir: Directory containing model artifacts
-        model_name: Name of the model
-        
-    Returns:
-        Initialized UltraFastRiskPredictor instance
-    """
-    onnx_path = os.path.join(models_dir, f"{model_name}.onnx")
-    scaler_path = os.path.join(models_dir, f"{model_name}_scaler.joblib")
-    uncertainty_path = os.path.join(models_dir, f"{model_name}_uncertainty.joblib")
+def load_predictor(models_dir: str = "ai_engine/models") -> UltraFastRiskPredictor:
+    onnx_path = os.path.join(models_dir, "risk_engine.onnx")
+    pipeline_path = os.path.join(models_dir, "feature_pipeline.pkl")
+    uncertainty_path = os.path.join(models_dir, "uncertainty_estimator.pkl")
     
     return UltraFastRiskPredictor(
         onnx_model_path=onnx_path,
-        scaler_path=scaler_path,
+        pipeline_path=pipeline_path,
         uncertainty_estimator_path=uncertainty_path
     )
 
 
 def main():
-    """Main function to test the predictor."""
     print("=" * 60)
     print("Ultra-Fast Risk Predictor Test")
     print("=" * 60)
     
-    # Check if model exists
     onnx_path = "ai_engine/models/risk_engine.onnx"
-    scaler_path = "ai_engine/models/risk_engine_scaler.joblib"
+    pipeline_path = "ai_engine/models/feature_pipeline.pkl"
     
     if not os.path.exists(onnx_path):
         print(f"\nError: ONNX model not found at {onnx_path}")
-        print("Please run train_risk_model.py first to generate the model.")
         return
     
-    if not os.path.exists(scaler_path):
-        print(f"\nError: Scaler not found at {scaler_path}")
-        print("Please run train_risk_model.py first to generate the scaler.")
+    if not os.path.exists(pipeline_path):
+        print(f"\nError: Feature pipeline not found at {pipeline_path}")
         return
     
-    # Load predictor
     print("\nLoading predictor...")
     predictor = load_predictor()
     
-    # Test single prediction
     print("\nTesting single prediction...")
     result = predictor.predict(
         timestamp=datetime.now(),
@@ -458,12 +329,10 @@ def main():
     print("\nPrediction Result:")
     print(json.dumps(result, indent=2, default=str))
     
-    # Benchmark latency
     print("\n" + "=" * 60)
     latency_metrics = predictor.benchmark_latency(n_iterations=1000)
     
-    # Check if target latency achieved
-    target_latency = 5.0  # 5ms target
+    target_latency = 5.0
     if latency_metrics['p95_latency_ms'] < target_latency:
         print(f"\n✓ Target latency ({target_latency}ms) achieved!")
         print(f"  P95 latency: {latency_metrics['p95_latency_ms']:.3f}ms")

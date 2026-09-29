@@ -21,11 +21,11 @@ from datetime import datetime, timedelta
 import jwt
 from passlib.context import CryptContext
 
-from app.core.database import get_db
-from app.core.config import get_settings
-from app.db.models import User, UserRole
-from app.services.sms_service import sms_service
-from app.services.notification import notification_manager
+from backend.app.api.v1.core.database import get_db
+from backend.app.api.v1.core.config import get_settings
+from backend.app.db.models import User, UserRole
+from backend.app.services.sms_service import sms_service
+from backend.app.services.notification import notification_manager
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 

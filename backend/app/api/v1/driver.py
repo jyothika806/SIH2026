@@ -18,10 +18,10 @@ from typing import Optional, List
 from datetime import datetime, date
 from enum import Enum
 
-from ..core.security import get_current_user
-from ..db.database import get_db
-from ..db.models import User, DriverProfile, DocumentVerification
-from ..core.config import Settings
+from backend.app.api.v1.core.security import get_current_user
+from backend.app.api.v1.core.database import get_db
+from backend.app.db.models import User, DriverProfile, DocumentVerification
+from backend.app.api.v1.core.config import Settings
 
 router = APIRouter(prefix="/driver", tags=["driver"])
 
@@ -42,7 +42,7 @@ class VerificationStatus(str, Enum):
 class DriverProfileCreate(BaseModel):
     license_number: str = Field(..., min_length=5, max_length=50)
     license_expiry: date
-    vehicle_type: str = Field(..., regex="^(bike|auto|cab)$")
+    vehicle_type: str = Field(..., pattern="^(bike|auto|cab)$")
     vehicle_number: str = Field(..., min_length=5, max_length=20)
     vehicle_model: str = Field(..., min_length=2, max_length=100)
     vehicle_color: str = Field(..., min_length=2, max_length=50)

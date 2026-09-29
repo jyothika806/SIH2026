@@ -19,8 +19,8 @@ from enum import Enum
 import logging
 import json
 
-from app.db.models import Notification, User
-from app.core.config import get_settings
+from backend.app.db.models import Notification, User
+from backend.app.api.core.config import get_settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

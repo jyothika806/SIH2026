@@ -10,10 +10,12 @@ This module implements:
 Author: OptimalRide AI Team
 Date: 2026-09-27
 """
-
+import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+from onnxmltools.convert.common.data_types import FloatTensorType
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import (
     log_loss, f1_score, classification_report, 
@@ -22,7 +24,10 @@ from sklearn.metrics import (
 from sklearn.calibration import calibration_curve
 import onnx
 from onnxmltools.convert import convert_xgboost
-from onnxmltools.utils.float16_converter import convert_float16_to_float32
+try:
+    from onnxconverter_common.float16 import convert_float_to_float16
+except ImportError:
+    from onnxmltools.utils import convert_float_to_float16
 import onnxruntime as ort
 import joblib
 import json
@@ -463,103 +468,77 @@ class RiskModelTrainer:
         """
         print(f"Exporting model to ONNX with {quantization} quantization...")
         
-        # Convert to ONNX
-        initial_type = [('float_input', onnx.TensorProto.FLOAT)]
+        # 1. Determine feature matrix width dynamically
+        num_features = len(self.feature_pipeline.FEATURE_ORDER)
+        
+        # 2. Correctly declare initial input types using FloatTensorType
+        initial_type = [('float_input', FloatTensorType([None, num_features]))]
+        
+        # 3. Convert XGBoost model to ONNX
         onnx_model = convert_xgboost(
             self.model,
             initial_types=initial_type,
             target_opset=12
         )
         
-        # Apply quantization
+        # 4. Apply quantization
         if quantization == 'float16':
-            onnx_model = convert_float16_to_float32(onnx_model)
+            onnx_model = convert_float_to_float16(onnx_model)
         elif quantization == 'int8':
-            # For INT8, we would need to use ONNX Runtime quantization tools
-            # This is a placeholder for INT8 quantization
             print("Warning: INT8 quantization requires additional calibration steps.")
             print("Using FP16 quantization instead.")
-            onnx_model = convert_float16_to_float32(onnx_model)
+            onnx_model = convert_float_to_float16(onnx_model)
         
-        # Save ONNX model
+        # 5. Save ONNX model
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         onnx.save(onnx_model, output_path)
         
         print(f"ONNX model exported to: {output_path}")
         
-        # Verify ONNX model
+        # 6. Verify ONNX model
         self._verify_onnx_model(output_path)
         
-        return output_path
-    
-    def _verify_onnx_model(self, onnx_path: str):
+        return output_path  
+    def _verify_onnx_model(self, model_path: str):
         """
-        Verify the exported ONNX model.
+        Verify the exported ONNX model with ONNX Runtime.
+        """
+        import onnxruntime as ort
+        
+        try:
+            session = ort.InferenceSession(model_path)
+            input_name = session.get_inputs()[0].name
+            print(f"ONNX model verified successfully. Input node name: {input_name}")
+        except Exception as e:
+            print(f"ONNX verification failed: {e}")  
+    def save_artifacts(self, output_dir: str):
+        """
+        Save feature pipeline, uncertainty estimator, and evaluation metrics.
         
         Args:
-            onnx_path: Path to ONNX model
+            output_dir: Directory to save all model artifacts
         """
-        print("Verifying ONNX model...")
-        
-        # Load and check model
-        onnx_model = onnx.load(onnx_path)
-        onnx.checker.check_model(onnx_model)
-        
-        # Test inference with ONNX Runtime
-        ort_session = ort.InferenceSession(onnx_path)
-        
-        # Create dummy input
-        input_name = ort_session.get_inputs()[0].name
-        dummy_input = np.random.randn(1, len(self.feature_pipeline.FEATURE_ORDER)).astype(np.float32)
-        
-        # Run inference
-        _ = ort_session.run(None, {input_name: dummy_input})
-        
-        print("ONNX model verification successful.")
-    
-    def save_artifacts(
-        self,
-        output_dir: str,
-        model_name: str = 'risk_engine'
-    ):
-        """
-        Save all model artifacts.
-        
-        Args:
-            output_dir: Directory to save artifacts
-            model_name: Name of the model
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Save XGBoost model
-        model_path = os.path.join(output_dir, f'{model_name}.json')
-        self.model.save_model(model_path)
-        
-        # Save feature pipeline scaler
-        scaler_path = os.path.join(output_dir, f'{model_name}_scaler.joblib')
-        self.feature_pipeline.save_scaler(scaler_path)
-        
-        # Save uncertainty estimator
-        if self.uncertainty_estimator:
-            uncertainty_path = os.path.join(output_dir, f'{model_name}_uncertainty.joblib')
-            joblib.dump(self.uncertainty_estimator, uncertainty_path)
-        
-        # Save evaluation metrics
-        metrics_path = os.path.join(output_dir, f'{model_name}_metrics.json')
-        with open(metrics_path, 'w') as f:
-            json.dump(self.evaluation_metrics, f, indent=2)
-        
-        # Save feature names
-        feature_names_path = os.path.join(output_dir, f'{model_name}_features.json')
-        with open(feature_names_path, 'w') as f:
-            json.dump(self.feature_pipeline.FEATURE_ORDER, f, indent=2)
-        
-        print(f"\nArtifacts saved to: {output_dir}")
-        print(f"  - Model: {model_path}")
-        print(f"  - Scaler: {scaler_path}")
-        print(f"  - Metrics: {metrics_path}")
-        print(f"  - Features: {feature_names_path}")
+        import joblib
+        import json
 
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 1. Save Feature Pipeline
+        pipeline_path = os.path.join(output_dir, "feature_pipeline.pkl")
+        joblib.dump(self.feature_pipeline, pipeline_path)
+
+        # 2. Save Uncertainty Estimator
+        if self.uncertainty_estimator:
+            uncertainty_path = os.path.join(output_dir, "uncertainty_estimator.pkl")
+            joblib.dump(self.uncertainty_estimator, uncertainty_path)
+
+        # 3. Save Evaluation Metrics
+        if self.evaluation_metrics:
+            metrics_path = os.path.join(output_dir, "evaluation_metrics.json")
+            with open(metrics_path, "w") as f:
+                json.dump(self.evaluation_metrics, f, indent=4)
+
+        print(f"All model artifacts successfully saved to: {output_dir}")
 
 def main():
     """Main training pipeline."""

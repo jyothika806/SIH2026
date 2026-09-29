@@ -18,7 +18,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 import asyncio
 
-from app.core.config import get_settings
+from backend.app.api.core.config import get_settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

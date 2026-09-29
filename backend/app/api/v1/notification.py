@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
-from ..core.security import get_current_user
-from ..db.database import get_db
-from ..services.notification_service import notification_service, NotificationType
+from backend.app.api.v1.core.security import get_current_user
+from backend.app.api.v1.core.database import get_db
+from backend.app.services.notification_service import notification_service, NotificationType
 
 router = APIRouter(prefix="/notification", tags=["Notification"])
 
@@ -24,7 +24,7 @@ class SendNotificationRequest(BaseModel):
     user_id: int = Field(..., gt=0)
     title: str = Field(..., min_length=1, max_length=255)
     body: str = Field(..., min_length=1, max_length=1000)
-    notification_type: str = Field(..., regex="^(ride|otp|emergency|promo|payment|rating)$")
+    notification_type: str = Field(..., pattern="^(ride|otp|emergency|promo|payment|rating)$")
     data: Optional[Dict] = None
     use_sms_fallback: bool = False
 

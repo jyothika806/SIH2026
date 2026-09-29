@@ -18,7 +18,7 @@ from typing import Dict, Optional, List
 from datetime import datetime, timedelta
 import secrets
 
-from app.core.config import get_settings
+from backend.app.api.core.config import get_settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

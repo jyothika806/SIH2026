@@ -21,7 +21,7 @@ from sqlalchemy import MetaData, text
 from typing import AsyncGenerator
 import logging
 
-from app.core.config import get_settings
+from .config import get_settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

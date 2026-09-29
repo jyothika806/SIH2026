@@ -25,20 +25,20 @@ class FareSplitScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildTotalFareCard(),
+            _buildTotalFareCard(context),
             const SizedBox(height: 16),
-            _buildSplitMethodCard(),
+            _buildSplitMethodCard(context),
             const SizedBox(height: 16),
-            _buildAllocationsList(),
+            _buildAllocationsList(context),
             const SizedBox(height: 24),
-            _buildPayButton(),
+            _buildPayButton(context),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildTotalFareCard() {
+  Widget _buildTotalFareCard(BuildContext context) {
     return Card(
       color: AppConfig.primaryColor,
       child: Padding(
@@ -65,7 +65,7 @@ class FareSplitScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildSplitMethodCard() {
+  Widget _buildSplitMethodCard(BuildContext context) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -102,7 +102,7 @@ class FareSplitScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildAllocationsList() {
+  Widget _buildAllocationsList(BuildContext context) {
     return Card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -117,13 +117,13 @@ class FareSplitScreen extends StatelessWidget {
             ),
           ),
           const Divider(height: 1),
-          ...allocations.map((allocation) => _buildAllocationTile(allocation)),
+          ...allocations.map((allocation) => _buildAllocationTile(context, allocation)),
         ],
       ),
     );
   }
 
-  Widget _buildAllocationTile(FareSplit allocation) {
+  Widget _buildAllocationTile(BuildContext context, FareSplit allocation) {
     return ListTile(
       leading: CircleAvatar(
         backgroundColor: allocation.isPrimary
@@ -185,7 +185,7 @@ class FareSplitScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildPayButton() {
+  Widget _buildPayButton(BuildContext context) {
     final myAllocation = allocations.firstWhere(
       (a) => a.isPrimary,
       orElse: () => allocations.first,

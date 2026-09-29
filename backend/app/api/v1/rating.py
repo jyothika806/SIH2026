@@ -14,9 +14,9 @@ from sqlalchemy import select, and_, func
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
-from ..core.security import get_current_user
-from ..db.database import get_db
-from ..db.models import RideRating, Ride, User
+from backend.app.api.v1.core.security import get_current_user
+from .core.database import get_db
+from backend.app.db.models import RideRating, Ride, User
 
 router = APIRouter(prefix="/rating", tags=["Rating"])
 
@@ -26,7 +26,7 @@ class RatingRequest(BaseModel):
     rated_user_id: int = Field(..., gt=0)
     rating: int = Field(..., ge=1, le=5)
     review: Optional[str] = Field(None, max_length=1000)
-    rating_category: str = Field("overall", regex="^(safety|punctuality|behavior|overall)$")
+    rating_category: str = Field("overall", pattern="^(safety|punctuality|behavior|overall)$")
 
 
 class RatingResponse(BaseModel):

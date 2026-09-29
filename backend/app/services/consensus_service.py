@@ -19,9 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from enum import Enum
 
-from app.core.config import get_settings
-from app.db.models import Ride, MidRouteRequest, User
-from app.api.v1.rides import manager
+from backend.app.api.core.config import get_settings
+from backend.app.db.models import Ride, MidRouteRequest, User
+from backend.app.api.v1.rides import manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -245,16 +245,16 @@ class ConsensusService:
             Dict with vote result and summary
         """
         if vote_id not in self.active_votes:
-            raise ValueError(f"Vote {vote_id}
+            raise ValueError(f"Vote {vote_id} not found")
         
         vote_session = self.active_votes[vote_id]
         
         if vote_session.status != VoteStatus.PENDING:
-            raise ValueError(f"Vote {vote_id} is not pending (status: {vote_session.status})")
+            raise ValueError(f"Vote {vote_id} is not pending ")
         
         # Cast the vote
         if not vote_session.cast_vote(passenger_id, vote):
-            raise ValueError(f"Passenger {passenger_id} cannot vote in this session")
+            raise ValueError(f"Passenger {passenger_id} failed to vote")
         
         # Calculate result
         result = vote_session.calculate_result()

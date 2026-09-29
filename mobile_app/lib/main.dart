@@ -10,7 +10,7 @@ import 'providers/emergency_provider.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/driver/driver_home_screen.dart';
 import 'screens/booking/booking_screen.dart';
-import 'screens/tracking/ride_tracking_screen.dart';
+// import 'screens/tracking/ride_tracking_screen.dart'; // TODO: Create this screen
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();

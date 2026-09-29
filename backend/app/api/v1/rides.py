@@ -23,16 +23,16 @@ from datetime import datetime
 import json
 import asyncio
 
-from app.core.database import get_db
-from app.core.config import get_settings
-from app.db.models import (
+from backend.app.api.v1.core.database import get_db
+from backend.app.api.v1.core.config import get_settings
+from backend.app.db.models import (
     User, Ride, MidRouteRequest, UserRole, VehicleType,
     RideStatus, MidRouteStatus
 )
-from app.db.spatial_queries import spatial_service
-from app.services.matching_service import matching_service
-from app.services.notification import notification_manager, NotificationType
-from app.api.v1.auth import get_current_user
+from backend.app.db.spatial_queries import spatial_service
+from backend.app.services.matching_service import matching_service
+from backend.app.services.notification import notification_manager, NotificationType
+from backend.app.api.v1.auth import get_current_user
 
 router = APIRouter(prefix="/rides", tags=["Rides"])
 
@@ -551,7 +551,7 @@ async def update_telemetry(
             )
         
         # Create telemetry record
-        from app.db.models import Telemetry
+        from backend.app.db.models import Telemetry
         
         telemetry_record = Telemetry(
             ride_id=telemetry.ride_id,
@@ -679,7 +679,7 @@ async def websocket_ride_tracking(
     try:
         # Verify token
         try:
-            from app.api.v1.auth import verify_token
+            from backend.app.api.v1.auth import verify_token
             payload = verify_token(token, "access")
             user_id = payload.get("sub")
             user_role = payload.get("role")

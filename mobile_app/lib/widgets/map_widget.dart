@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:flutter_map/flutter_map.dart' show CameraFit;
 
 class MapWidget extends StatelessWidget {
   final LatLng pickupLocation;
@@ -23,15 +24,20 @@ class MapWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Calculate bounds to fit all markers
-    final bounds = LatLngBounds();
-    bounds.extend(pickupLocation);
-    bounds.extend(dropoffLocation);
+    final latitudes = [pickupLocation.latitude, dropoffLocation.latitude];
+    final longitudes = [pickupLocation.longitude, dropoffLocation.longitude];
     
     if (driverLocations != null) {
       for (final location in driverLocations!) {
-        bounds.extend(location);
+        latitudes.add(location.latitude);
+        longitudes.add(location.longitude);
       }
     }
+    
+    final bounds = LatLngBounds(
+      LatLng(latitudes.reduce((a, b) => a < b ? a : b), longitudes.reduce((a, b) => a < b ? a : b)),
+      LatLng(latitudes.reduce((a, b) => a > b ? a : b), longitudes.reduce((a, b) => a > b ? a : b)),
+    );
 
     return FlutterMap(
       options: MapOptions(
@@ -40,9 +46,9 @@ class MapWidget extends StatelessWidget {
           (pickupLocation.longitude + dropoffLocation.longitude) / 2,
         ),
         initialZoom: 13.0,
-        bounds: bounds,
-        boundsOptions: const FitBoundsOptions(
-          padding: EdgeInsets.all(50),
+        initialCameraFit: CameraFit.bounds(
+          bounds: bounds,
+          padding: const EdgeInsets.all(50),
         ),
       ),
       children: [

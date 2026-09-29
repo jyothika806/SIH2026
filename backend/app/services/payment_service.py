@@ -18,8 +18,8 @@ from datetime import datetime
 from enum import Enum
 import logging
 
-from app.db.models import Wallet, Transaction, User, Ride
-from app.core.config import get_settings
+from backend.app.db.models import Wallet, Transaction, User, Ride
+from backend.app.api.core.config import get_settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

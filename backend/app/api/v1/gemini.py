@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, List, Literal
 from datetime import datetime
 
-from app.api.v1.auth import get_current_user
-from app.services.gemini_service import gemini_safety_service, GeminiIncidentTriageResult
+from backend.app.api.v1.auth import get_current_user
+from backend.app.services.gemini_service import gemini_safety_service, GeminiIncidentTriageResult
 
 router = APIRouter(prefix="/gemini", tags=["Gemini AI Safety"])
 

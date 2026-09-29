@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
 
-from app.core.config import get_settings
-from app.db.models import VehicleType
+from backend.app.api.core.config import get_settings
+from backend.app.db.models import VehicleType
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

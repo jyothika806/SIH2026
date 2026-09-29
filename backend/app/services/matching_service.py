@@ -17,9 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 import asyncio
 
-from app.core.config import get_settings
-from app.db.spatial_queries import SpatialQueryService
-from app.db.models import Ride, VehicleType, RideStatus
+from backend.app.api.core.config import get_settings
+from backend.app.db.spatial_queries import SpatialQueryService
+from backend.app.db.models import Ride, VehicleType, RideStatus
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

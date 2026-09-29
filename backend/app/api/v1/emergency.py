@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Literal
 from datetime import datetime
 
-from app.api.v1.auth import get_current_user
-from app.services.emergency_service import (
+from backend.app.api.v1.auth import get_current_user
+from backend.app.services.emergency_service import (
     emergency_service, EmergencyIncident, GuardianModeSession,
     EmergencySeverity, EmergencyType
 )

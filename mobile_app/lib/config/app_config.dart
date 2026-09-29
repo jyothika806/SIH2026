@@ -1,3 +1,5 @@
+import 'package:flutter/material.dart';
+
 class AppConfig {
   static const String appName = 'OptimalRide';
   static const String appVersion = '1.0.0';

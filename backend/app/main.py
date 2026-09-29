@@ -21,8 +21,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 from .api.v1 import auth, rides, liveness, risk, gemini, consensus, fare, emergency, driver, dispatch, payment, notification, rating
 
 # Import database and config
-from app.core.database import init_db, close_db, check_db_connection
-from app.core.config import get_settings
+from backend.app.api.v1.core.database import init_db, close_db, check_db_connection
+from backend.app.api.v1.core.config import get_settings
 
 # Get settings
 settings = get_settings()
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
     # Load AI Risk Engine models
     print("\nLoading AI Risk Engine models...")
     try:
-        from app.api.v1.risk import get_predictor
+        from backend.app.api.v1.risk import get_predictor
         get_predictor()
         print("Risk Engine models loaded successfully")
     except Exception as e:
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
     # Load Liveness Detection detectors
     print("\nLoading Liveness Detection detectors...")
     try:
-        from app.api.v1.liveness import get_liveness_detector, get_fallback_handler
+        from backend.app.api.v1.liveness import get_liveness_detector, get_fallback_handler
         get_liveness_detector()
         get_fallback_handler()
         print("Liveness Detection detectors loaded successfully")
@@ -204,7 +204,7 @@ if __name__ == "__main__":
     import uvicorn
     
     uvicorn.run(
-        "app.main:app",
+        "backend.app.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug

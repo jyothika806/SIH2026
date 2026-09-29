@@ -21,10 +21,10 @@ from enum import Enum
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, insert
 
-from app.core.config import get_settings
-from app.db.models import User, Ride
-from app.services.notification import notification_manager
-from app.services.sms_service import sms_service
+from backend.app.api.core.config import get_settings
+from backend.app.db.models import User, Ride
+from backend.app.services.notification import notification_manager
+from backend.app.services.sms_service import sms_service
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

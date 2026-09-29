@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/ride_provider.dart';
 import '../../providers/emergency_provider.dart';
+import '../../providers/auth_provider.dart';
 import '../../config/app_config.dart';
 import '../emergency/sos_screen.dart';
 
@@ -419,7 +420,7 @@ class _BookingScreenState extends State<BookingScreen> {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              Provider.of<AuthProvider>(context, listen: false).logout();
+              context.read<AuthProvider>().logout();
             },
             child: const Text('Logout'),
             style: TextButton.styleFrom(foregroundColor: AppConfig.dangerColor),

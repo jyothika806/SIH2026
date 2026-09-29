@@ -17,7 +17,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from app.core.config import get_settings
+from backend.app.api.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

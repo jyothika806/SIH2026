@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
-from ..core.security import get_current_user
-from ..db.database import get_db
-from ..services.payment_service import payment_service
+from backend.app.api.v1.core.security import get_current_user
+from backend.app.api.v1.core.database import get_db
+from backend.app.services.payment_service import payment_service
 
 router = APIRouter(prefix="/payment", tags=["Payment"])
 

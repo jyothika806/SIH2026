@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional, Tuple
 import logging
 
-from app.db.models import Ride, MidRouteRequest, RideStatus
-from app.core.config import get_settings
+from backend.app.db.models import Ride, MidRouteRequest, RideStatus
+from backend.app.api.core.config import get_settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -465,7 +465,7 @@ spatial_service = SpatialQueryService()
 
 if __name__ == "__main__":
     import asyncio
-    from app.core.database import AsyncSessionLocal
+    from backend.app.api.v1.core.database import AsyncSessionLocal
     
     async def test_spatial_queries():
         """Test spatial query service."""

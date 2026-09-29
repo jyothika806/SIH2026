@@ -12,7 +12,7 @@ Date: 2026-09-27
 """
 
 from sqlalchemy import (
-    Column, String, Integer, Float, Boolean, DateTime, 
+    Column, String, Integer, Float, Boolean, DateTime, Date,
     ForeignKey, Enum as SQLEnum, Text, JSON, func
 )
 from sqlalchemy.orm import relationship
@@ -22,7 +22,7 @@ import enum
 from datetime import datetime
 from typing import Optional, List
 
-from app.core.database import Base
+from backend.app.api.core.database import Base
 
 
 class UserRole(str, enum.Enum):

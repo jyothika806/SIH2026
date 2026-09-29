@@ -19,8 +19,8 @@ from enum import Enum
 import logging
 import asyncio
 
-from app.db.models import User, DriverProfile, Ride
-from app.core.config import get_settings
+from backend.app.db.models import User, DriverProfile, Ride
+from backend.app.api.core.config import get_settings
 from geoalchemy2 import functions as geofunc
 
 # Configure logging

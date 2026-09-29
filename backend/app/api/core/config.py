@@ -13,7 +13,8 @@ Author: OptimalRide Backend Team
 Date: 2026-09-27
 """
 
-from pydantic import BaseSettings, Field, field_validator
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings
 from typing import Optional
 import os
 from functools import lru_cache
@@ -38,7 +39,7 @@ class Settings(BaseSettings):
     
     # Database Settings
     database_url: str = Field(
-        ...,
+        default="postgresql+asyncpg://postgres:JyothikA@localhost:5432/optimalride",
         description="PostgreSQL database URL with asyncpg driver"
     )
     database_pool_size: int = 20
@@ -105,7 +106,12 @@ class Settings(BaseSettings):
     bike_to_auto_threshold: int = 2
     bike_to_cab_threshold: int = 5
     auto_to_cab_threshold: int = 3
-
+    # Dispatch & Matching Settings
+    dispatch_radius_km: float = 5.0
+    dispatch_timeout_seconds: int = 30
+    max_dispatch_attempts: int = 3
+    matching_radius_meters: int = 2000
+    matching_buffer_minutes: int = 5
     # Gemini AI Safety Copilot Settings
     gemini_api_key: Optional[str] = Field(
         None,
@@ -125,7 +131,8 @@ class Settings(BaseSettings):
     # Consensus Voting Settings
     consensus_vote_timeout_seconds: int = 15
     consensus_min_approval_ratio: float = 0.5
-
+    # Payment Settings
+    default_currency: str = "INR"
     # Fare Engine Settings
     base_fare_bike: float = 15.0
     base_fare_auto: float = 25.0

@@ -16,9 +16,9 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Literal, Optional
 from datetime import datetime
 
-from app.api.v1.auth import get_current_user
-from app.services.fare_service import fare_service, FareBreakdown, SplitFareAllocation, SurgeLevel
-from app.db.models import VehicleType
+from backend.app.api.v1.auth import get_current_user
+from backend.app.services.fare_service import fare_service, FareBreakdown, SplitFareAllocation, SurgeLevel
+from backend.app.db.models import VehicleType
 
 router = APIRouter(prefix="/fare", tags=["Fare & Payment"])
 

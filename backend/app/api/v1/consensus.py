@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Literal, Optional
 from datetime import datetime
 
-from app.api.v1.auth import get_current_user
-from app.services.consensus_service import consensus_service, VoteStatus
+from backend.app.api.v1.auth import get_current_user
+from backend.app.services.consensus_service import consensus_service, VoteStatus
 
 router = APIRouter(prefix="/consensus", tags=["Consensus Voting"])
 
