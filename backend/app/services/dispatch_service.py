@@ -19,9 +19,14 @@ from enum import Enum
 import logging
 import asyncio
 
-from backend.app.db.models import User, DriverProfile, Ride
+from backend.app.db.models import User, DriverProfile, Ride, RideStatus, SeatReservation
 from backend.app.api.core.config import get_settings
-from geoalchemy2 import functions as geofunc
+from backend.app.services.reservation_service import (
+    accept_driver_hold,
+    assign_driver_with_hold,
+)
+from backend.app.services.verification_service import driver_eligibility
+from geoalchemy2 import Geography, functions as geofunc
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -81,11 +86,16 @@ class DispatchService:
         try:
             radius = radius_km or self.default_radius_km
             radius_meters = radius * 1000
+            pickup = geofunc.ST_SetSRID(
+                geofunc.ST_MakePoint(pickup_lon, pickup_lat), 4326
+            ).cast(Geography(srid=4326))
+            driver_location = DriverProfile.current_location.cast(Geography(srid=4326))
+            distance = geofunc.ST_Distance(driver_location, pickup)
             
             # Build spatial query
             query = select(
-                DriverProfile.id,
                 DriverProfile.user_id,
+                DriverProfile.id,
                 DriverProfile.vehicle_type,
                 DriverProfile.vehicle_number,
                 DriverProfile.vehicle_model,
@@ -93,22 +103,12 @@ class DispatchService:
                 DriverProfile.rating,
                 DriverProfile.total_rides,
                 DriverProfile.current_location,
-                User.phone,
-                User.name
-            ).join(
-                User, DriverProfile.user_id == User.id
+                distance.label("distance_meters"),
             ).where(
                 and_(
                     DriverProfile.is_online == True,
                     DriverProfile.is_verified == True,
-                    geofunc.ST_DWithin(
-                        DriverProfile.current_location,
-                        geofunc.ST_SetSRID(
-                            geofunc.ST_MakePoint(pickup_lon, pickup_lat),
-                            4326
-                        ),
-                        radius_meters
-                    )
+                    geofunc.ST_DWithin(driver_location, pickup, radius_meters)
                 )
             )
             
@@ -117,15 +117,7 @@ class DispatchService:
                 query = query.where(DriverProfile.vehicle_type == vehicle_type)
             
             # Order by distance (closest first)
-            query = query.order_by(
-                geofunc.ST_Distance(
-                    DriverProfile.current_location,
-                    geofunc.ST_SetSRID(
-                        geofunc.ST_MakePoint(pickup_lon, pickup_lat),
-                        4326
-                    )
-                )
-            )
+            query = query.order_by(distance)
             
             result = await session.execute(query)
             drivers = result.all()
@@ -133,20 +125,14 @@ class DispatchService:
             # Format response with distance calculation
             driver_list = []
             for driver in drivers:
-                distance_meters = await session.scalar(
-                    select(
-                        geofunc.ST_Distance(
-                            driver.current_location,
-                            geofunc.ST_SetSRID(
-                                geofunc.ST_MakePoint(pickup_lon, pickup_lat),
-                                4326
-                            )
-                        )
-                    )
+                eligible, _, _ = await driver_eligibility(
+                    session, driver.user_id, vehicle_type, require_online=True
                 )
-                
+                if not eligible:
+                    continue
                 driver_list.append({
-                    "driver_id": driver.id,
+                    "driver_id": driver.user_id,
+                    "driver_profile_id": driver.id,
                     "user_id": driver.user_id,
                     "vehicle_type": driver.vehicle_type,
                     "vehicle_number": driver.vehicle_number,
@@ -154,9 +140,7 @@ class DispatchService:
                     "vehicle_color": driver.vehicle_color,
                     "rating": driver.rating,
                     "total_rides": driver.total_rides,
-                    "phone": driver.phone,
-                    "name": driver.name,
-                    "distance_km": round(distance_meters / 1000, 2)
+                    "distance_km": round(driver.distance_meters / 1000, 2)
                 })
             
             logger.info(f"Found {len(driver_list)} available drivers within {radius}km")
@@ -184,42 +168,19 @@ class DispatchService:
             Dispatch result with status and metadata
         """
         try:
-            # Check if ride exists and is in dispatchable state
-            ride = await session.execute(
-                select(Ride).where(Ride.id == ride_id)
+            success, message = await assign_driver_with_hold(
+                session, ride_id, driver_id
             )
-            ride = ride.scalar_one_or_none()
-            
-            if not ride:
-                return {
-                    "success": False,
-                    "error": "Ride not found"
-                }
-            
-            if ride.status not in ["requested", "searching"]:
-                return {
-                    "success": False,
-                    "error": f"Ride is in {ride.status} state, cannot dispatch"
-                }
-            
-            # Update ride status to dispatched
-            await session.execute(
-                update(Ride)
-                .where(Ride.id == ride_id)
-                .values(
-                    status="driver_assigned",
-                    driver_id=driver_id,
-                    updated_at=datetime.utcnow()
-                )
-            )
-            await session.commit()
-            
-            logger.info(f"Ride {ride_id} dispatched to driver {driver_id}")
+            if not success:
+                await session.rollback()
+                return {"success": False, "error": message}
+            logger.info("Ride %s dispatched to eligible driver %s", ride_id, driver_id)
             
             return {
                 "success": True,
                 "ride_id": ride_id,
                 "driver_id": driver_id,
+                "hold_expires_in_seconds": settings.seat_hold_ttl_seconds,
                 "dispatched_at": datetime.utcnow().isoformat()
             }
             
@@ -249,41 +210,11 @@ class DispatchService:
             Accept result with status
         """
         try:
-            # Check if ride is assigned to this driver
-            ride = await session.execute(
-                select(Ride).where(
-                    and_(
-                        Ride.id == ride_id,
-                        Ride.driver_id == driver_id
-                    )
-                )
-            )
-            ride = ride.scalar_one_or_none()
-            
-            if not ride:
-                return {
-                    "success": False,
-                    "error": "Ride not found or not assigned to this driver"
-                }
-            
-            if ride.status != "driver_assigned":
-                return {
-                    "success": False,
-                    "error": f"Ride is in {ride.status} state"
-                }
-            
-            # Update ride status to accepted
-            await session.execute(
-                update(Ride)
-                .where(Ride.id == ride_id)
-                .values(
-                    status="arrived",
-                    updated_at=datetime.utcnow()
-                )
-            )
-            await session.commit()
-            
-            logger.info(f"Driver {driver_id} accepted ride {ride_id}")
+            success, message = await accept_driver_hold(session, ride_id, driver_id)
+            if not success:
+                await session.rollback()
+                return {"success": False, "error": message}
+            logger.info("Driver %s accepted ride %s", driver_id, ride_id)
             
             return {
                 "success": True,
@@ -343,17 +274,26 @@ class DispatchService:
                     "error": f"Ride is in {ride.status} state"
                 }
             
-            # Reset ride to searching state
-            await session.execute(
-                update(Ride)
-                .where(Ride.id == ride_id)
-                .values(
-                    status="searching",
-                    driver_id=None,
-                    updated_at=datetime.utcnow()
+            reservation = await session.scalar(
+                select(SeatReservation)
+                .where(
+                    SeatReservation.ride_id == ride_id,
+                    SeatReservation.status == "held",
                 )
+                .with_for_update()
             )
-            await session.commit()
+            if reservation is not None:
+                reservation.status = "rejected"
+                reservation.reason = "driver_rejected"
+                reservation.updated_at = datetime.utcnow()
+            ride.status = (
+                RideStatus.SEARCHING
+                if ride.search_expires_at is None or ride.search_expires_at > datetime.utcnow()
+                else RideStatus.NO_DRIVER_FOUND
+            )
+            ride.driver_id = None
+            ride.updated_at = datetime.utcnow()
+            await session.flush()
             
             logger.info(f"Driver {driver_id} rejected ride {ride_id}. Reason: {reason}")
             

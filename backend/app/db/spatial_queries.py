@@ -11,7 +11,7 @@ Author: OptimalRide Backend Team
 Date: 2026-09-27
 """
 
-from sqlalchemy import text, select
+from sqlalchemy import bindparam, text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional, Tuple
 import logging
@@ -100,13 +100,15 @@ class SpatialQueryService:
                         {dropoff_point}::geography
                     ) as dropoff_distance,
                     -- Check if points are within buffered corridor
-                    ST_Within(
+                    ST_DWithin(
+                        r.route_geometry::geography,
                         {pickup_point}::geography,
-                        ST_Buffer(r.route_geometry::geography, {detour_distance})::geography
+                        {detour_distance}
                     ) as pickup_in_corridor,
-                    ST_Within(
+                    ST_DWithin(
+                        r.route_geometry::geography,
                         {dropoff_point}::geography,
-                        ST_Buffer(r.route_geometry::geography, {detour_distance})::geography
+                        {detour_distance}
                     ) as dropoff_in_corridor,
                     -- Calculate route segment order (for detour calculation)
                     ST_LineLocatePoint(
@@ -132,9 +134,10 @@ class SpatialQueryService:
                         )
                         OR
                         -- Pickup within buffered corridor
-                        ST_Within(
+                        ST_DWithin(
+                            r.route_geometry::geography,
                             {pickup_point}::geography,
-                            ST_Buffer(r.route_geometry::geography, {detour_distance})::geography
+                            {detour_distance}
                         )
                     )
                 ORDER BY
@@ -144,16 +147,16 @@ class SpatialQueryService:
             """.format(
                 pickup_point=pickup_point,
                 dropoff_point=dropoff_point,
-                detour_distance=detour_distance
-            ))
+                detour_distance=detour_distance_meters
+            )).bindparams(bindparam("active_statuses", expanding=True))
             
             result = await session.execute(
                 query,
                 {
                     "active_statuses": [
-                        RideStatus.DRIVER_ASSIGNED.value,
-                        RideStatus.ARRIVED.value,
-                        RideStatus.IN_PROGRESS.value
+                        RideStatus.DRIVER_ASSIGNED.name,
+                        RideStatus.ARRIVED.name,
+                        RideStatus.IN_PROGRESS.name
                     ],
                     "radius_meters": radius_meters
                 }

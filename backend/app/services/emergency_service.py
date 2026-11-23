@@ -84,7 +84,7 @@ class EmergencyIncident:
             "location_lon": self.location_lon,
             "timestamp": self.timestamp.isoformat(),
             "description": self.description,
-            "metadata": self.metadata,
+            "metadata": self.extra_metadata,
             "resolved": self.resolved,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None
         }
@@ -185,7 +185,7 @@ class EmergencyService:
             location_lon=location_lon,
             timestamp=datetime.utcnow(),
             description=description,
-            metadata=metadata or {}
+            extra_metadata=metadata or {}
         )
         
         self.active_incidents[incident_id] = incident
@@ -473,7 +473,7 @@ class EmergencyService:
             location_lon=location_lon,
             timestamp=datetime.utcnow(),
             description=description,
-            metadata=metadata or {}
+            extra_metadata=metadata or {}
         )
         
         self.active_incidents[incident_id] = incident

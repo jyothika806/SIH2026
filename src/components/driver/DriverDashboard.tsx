@@ -134,9 +134,10 @@ export const DriverDashboard: React.FC = () => {
         </button>
       )}
 
-      {verify && (
+      {verify && snap.activeRide && (
         <DriverVerificationScreen
           driverId="driver-001"
+          rideId={snap.activeRide.rideId}
           onCancel={() => setVerify(false)}
           onVerificationSuccess={() => setVerify(false)}
         />

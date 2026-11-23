@@ -22,6 +22,7 @@ import {
   submitConsent,
   triggerSos,
 } from '../engine/commuteEngine';
+import { authenticatedFetch } from './authenticatedFetch';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -72,6 +73,14 @@ export interface MidRideJoinRequest {
   dropoff: GeoLocation;
 }
 
+export interface RideOtpResponse {
+  ride_id: number;
+  otp_status: 'locked' | 'released';
+  verification_status: string;
+  otp_code: string | null;
+  otp_expires_at: string | null;
+}
+
 async function postGateway(endpoint: string, body?: unknown, method = 'POST') {
   try {
     await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -96,6 +105,31 @@ class PassengerApi {
     if (!ride) throw new Error('Ride not found');
     void fetch(`${API_BASE_URL}/api/v1/passenger/status/${rideId}`).catch(() => undefined);
     return ride;
+  }
+
+  async retrieveRideOtp(rideId: string): Promise<RideOtpResponse> {
+    const response = await authenticatedFetch(
+      `${API_BASE_URL}/api/v1/liveness/otp-status/${encodeURIComponent(rideId)}`,
+      { cache: 'no-store' },
+    );
+    const payload = (await response.json().catch(() => ({}))) as Partial<RideOtpResponse> & { detail?: unknown };
+    if (!response.ok) {
+      throw new Error(typeof payload.detail === 'string' ? payload.detail : 'Unable to retrieve trip OTP');
+    }
+    if (
+      typeof payload.ride_id !== 'number' ||
+      (payload.otp_status !== 'locked' && payload.otp_status !== 'released') ||
+      typeof payload.verification_status !== 'string'
+    ) {
+      throw new Error('Backend returned an invalid OTP status');
+    }
+    return {
+      ride_id: payload.ride_id,
+      otp_status: payload.otp_status,
+      verification_status: payload.verification_status,
+      otp_code: typeof payload.otp_code === 'string' ? payload.otp_code : null,
+      otp_expires_at: typeof payload.otp_expires_at === 'string' ? payload.otp_expires_at : null,
+    };
   }
 
   async streamStatus(rideId: string, location: GeoLocation) {

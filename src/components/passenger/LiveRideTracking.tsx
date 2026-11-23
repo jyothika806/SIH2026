@@ -16,6 +16,8 @@ export const LiveRideTracking: React.FC<LiveRideTrackingProps> = ({ rideId, onRi
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [releasedOtp, setReleasedOtp] = useState<string | null>(null);
+  const [otpError, setOtpError] = useState<string | null>(null);
 
   const consent = passengerApi.getPendingConsent();
   useSiren(Boolean(ride?.geofence.breached), muted);
@@ -32,6 +34,8 @@ export const LiveRideTracking: React.FC<LiveRideTrackingProps> = ({ rideId, onRi
   };
 
   useEffect(() => {
+    setReleasedOtp(null);
+    setOtpError(null);
     void refresh();
     const interval = window.setInterval(() => void refresh(), 4000);
     const unsub = subscribeEngine(() => void refresh());
@@ -126,36 +130,41 @@ export const LiveRideTracking: React.FC<LiveRideTrackingProps> = ({ rideId, onRi
         </p>
       </div>
 
-      <div className={`mb-4 rounded-xl p-4 ${ride.otpLocked ? 'bg-slate-100' : 'bg-amber-50'}`}>
+      <div className={`mb-4 rounded-xl p-4 ${releasedOtp ? 'bg-amber-50' : 'bg-slate-100'}`}>
         <p className="mb-2 flex items-center gap-2 font-semibold">
-          {ride.otpLocked ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4 text-emerald-700" />}
+          {releasedOtp ? <Unlock className="h-4 w-4 text-emerald-700" /> : <Lock className="h-4 w-4" />}
           Trip start OTP
         </p>
         <p className="text-center text-4xl font-bold tracking-[0.4em]">
-          {ride.otpLocked ? '••••' : ride.otp}
+          {releasedOtp ?? '••••••'}
         </p>
-        {ride.otpLocked ? (
+        {!releasedOtp ? (
           <button
             disabled={verifying}
             onClick={async () => {
               setVerifying(true);
-              await fetch('/api/v1/driver/verify-identity', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ driverId: 'driver-001', verificationMethod: 'facial' }),
-              }).catch(() => undefined);
-              const { driverApi } = await import('../../services/driverApi');
-              await driverApi.verifyIdentity({ driverId: 'driver-001', verificationMethod: 'facial' });
-              setVerifying(false);
-              void refresh();
+              setOtpError(null);
+              try {
+                const result = await passengerApi.retrieveRideOtp(rideId);
+                if (result.otp_status === 'released' && result.otp_code && /^\d{6}$/.test(result.otp_code)) {
+                  setReleasedOtp(result.otp_code);
+                } else {
+                  setOtpError('OTP remains locked until successful backend driver verification.');
+                }
+              } catch (requestError) {
+                setOtpError(requestError instanceof Error ? requestError.message : 'Unable to retrieve trip OTP');
+              } finally {
+                setVerifying(false);
+              }
             }}
             className="mt-3 w-full rounded-lg bg-blue-600 py-2 text-white"
           >
-            {verifying ? 'Requesting scan…' : 'Verify driver identity'}
+            {verifying ? 'Checking verification…' : 'Retrieve trip OTP'}
           </button>
         ) : (
           <p className="mt-2 text-center text-xs text-emerald-700">Identity verified — OTP unlocked for passenger and driver</p>
         )}
+        {otpError && <p role="alert" className="mt-2 text-center text-sm text-red-600">{otpError}</p>}
       </div>
 
       <div className="flex gap-2">

@@ -15,7 +15,9 @@
     "server:dev": "nodemon --exec 'node --loader ts-node/esm server.ts' --ext ts",
     "compile": "tsc --noEmit",
     "start": "node dist/server.js",
-    "build:all": "npm run build && tsc -p tsconfig.server.json"
+    "build:all": "npm run build && tsc -p tsconfig.server.json",
+    "pretest:e2e": "npm run build:all",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@google/genai": "^2.3.0",
@@ -38,6 +40,7 @@
     "@vitejs/plugin-react": "^4.3.2",
     "autoprefixer": "^10.4.20",
     "nodemon": "^3.1.7",
+    "@playwright/test": "^1.51.0",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
     "ts-node": "^10.9.2",

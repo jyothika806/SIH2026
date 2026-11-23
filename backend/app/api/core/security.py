@@ -1,30 +1,61 @@
-import jwt
-from datetime import datetime, timedelta
-from typing import Optional
+"""Authenticated principal dependencies backed by the canonical JWT auth router."""
+
+from dataclasses import dataclass
+
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from backend.app.api.core.config import get_settings
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-settings = get_settings()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+from backend.app.api.v1.auth import get_current_user as auth_get_current_user
+from backend.app.api.v1.core.database import get_db
+from backend.app.db.models import User
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES if hasattr(settings, 'ACCESS_TOKEN_EXPIRE_MINUTES') else 60))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm="HS256")
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+@dataclass(frozen=True)
+class AuthenticatedPrincipal:
+    user_id: int
+    role: str
+    phone: str | None
+
+
+async def get_authenticated_principal(
+    user: dict = Depends(auth_get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AuthenticatedPrincipal:
+    subject = user.get("sub")
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=["HS256"])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-        return user_id
-    except jwt.PyJWTError:
-        raise credentials_exception
+        user_id = int(subject)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+    account = await db.scalar(select(User).where(User.id == user_id))
+    if account is None or not account.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is unavailable",
+        )
+    return AuthenticatedPrincipal(
+        user_id=user_id,
+        role=account.role.value,
+        phone=account.phone,
+    )
+
+
+async def get_current_user(user: dict = Depends(auth_get_current_user)) -> dict:
+    payload = dict(user)
+    subject = payload.get("sub")
+    if subject is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+    try:
+        payload["id"] = int(subject)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+    return payload

@@ -31,15 +31,15 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # Create async engine
-engine = create_async_engine(
-    settings.database_url,
-    pool_size=settings.database_pool_size,
-    max_overflow=settings.database_max_overflow,
-    pool_timeout=settings.database_pool_timeout,
-    pool_recycle=settings.database_pool_recycle,
-    echo=settings.debug,
-    future=True
-)
+engine_options = {"echo": settings.debug, "future": True}
+if not settings.database_url.startswith("sqlite+aiosqlite://"):
+    engine_options.update({
+        "pool_size": settings.database_pool_size,
+        "max_overflow": settings.database_max_overflow,
+        "pool_timeout": settings.database_pool_timeout,
+        "pool_recycle": settings.database_pool_recycle,
+    })
+engine = create_async_engine(settings.database_url, **engine_options)
 
 # Create async session maker
 AsyncSessionLocal = async_sessionmaker(
@@ -76,7 +76,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.commit()
         except Exception as e:
             await session.rollback()
-            logger.error(f"Database session error: {str(e)}")
+            logger.error("Database session error (%s)", type(e).__name__)
             raise
         finally:
             await session.close()
@@ -89,20 +89,23 @@ async def init_db() -> None:
     Creates all tables and ensures PostGIS extension is enabled.
     Should be called on application startup.
     """
+    if not settings.auto_create_schema or settings.environment.lower() not in {"development", "test"}:
+        logger.info("Automatic schema creation is disabled; apply Alembic migrations")
+        return
+
     try:
         async with engine.begin() as conn:
             # Enable PostGIS extension
-            await conn.execute(
-                text("CREATE EXTENSION IF NOT EXISTS postgis")
-            )
-            logger.info("PostGIS extension enabled")
+            if settings.database_url.startswith(("postgresql+asyncpg://", "postgresql://")):
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+                logger.info("PostGIS extension enabled")
             
             # Create all tables
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Database tables created successfully")
             
     except Exception as e:
-        logger.error(f"Database initialization failed: {str(e)}")
+        logger.error("Database initialization failed (%s)", type(e).__name__)
         raise
 
 
@@ -116,7 +119,7 @@ async def close_db() -> None:
         await engine.dispose()
         logger.info("Database connections closed successfully")
     except Exception as e:
-        logger.error(f"Error closing database: {str(e)}")
+        logger.error("Error closing database (%s)", type(e).__name__)
 
 
 async def check_db_connection() -> bool:
@@ -131,7 +134,7 @@ async def check_db_connection() -> bool:
             await session.execute(text("SELECT 1"))
             return True
     except Exception as e:
-        logger.error(f"Database connection check failed: {str(e)}")
+        logger.error("Database connection check failed (%s)", type(e).__name__)
         return False
 
 

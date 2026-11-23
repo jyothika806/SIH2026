@@ -94,7 +94,9 @@ export const DriverNavigation: React.FC = () => {
             <input
               value={otp}
               onChange={(e) => setOtp(e.target.value)}
-              maxLength={4}
+              maxLength={6}
+              inputMode="numeric"
+              pattern="[0-9]{6}"
               placeholder="Enter OTP from passenger"
               className="mb-3 w-full rounded-lg border px-3 py-2 text-center tracking-[0.4em]"
             />
@@ -132,6 +134,7 @@ export const DriverNavigation: React.FC = () => {
       {verify && (
         <DriverVerificationScreen
           driverId="driver-001"
+          rideId={ride.rideId}
           onCancel={() => setVerify(false)}
           onVerificationSuccess={() => setVerify(false)}
         />
