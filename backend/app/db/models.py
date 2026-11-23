@@ -13,7 +13,8 @@ Date: 2026-09-27
 
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean, DateTime, Date,
-    ForeignKey, Enum as SQLEnum, Text, JSON, func
+    ForeignKey, Enum as SQLEnum, Text, JSON, func, LargeBinary,
+    CheckConstraint, UniqueConstraint, Index, text
 )
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
@@ -48,6 +49,7 @@ class RideStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    NO_DRIVER_FOUND = "no_driver_found"
     NO_SHOW = "no_show"
 
 
@@ -128,9 +130,22 @@ class Ride(Base):
     """
     
     __tablename__ = "rides"
+    __table_args__ = (
+        CheckConstraint(
+            "seats_occupied >= 0 AND seats_total >= 0 AND seats_occupied <= seats_total",
+            name="ck_rides_seat_counts",
+        ),
+        Index(
+            "uq_active_passenger_booking",
+            "passenger_id",
+            unique=True,
+            postgresql_where=text("status IN ('REQUESTED', 'SEARCHING', 'DRIVER_ASSIGNED', 'ARRIVED')"),
+            sqlite_where=text("status IN ('REQUESTED', 'SEARCHING', 'DRIVER_ASSIGNED', 'ARRIVED')"),
+        ),
+    )
     
     id = Column(Integer, primary_key=True, index=True)
-    driver_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    driver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     passenger_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     vehicle_type = Column(SQLEnum(VehicleType), nullable=False)
     
@@ -147,9 +162,13 @@ class Ride(Base):
     status = Column(SQLEnum(RideStatus), default=RideStatus.REQUESTED)
     
     # OTP
-    otp = Column(String(6), nullable=True)
+    otp = Column(String(512), nullable=True)
+    otp_hash = Column(String(64), nullable=True)
     otp_unlocked = Column(Boolean, default=False)
     otp_expires_at = Column(DateTime(timezone=True), nullable=True)
+    otp_consumed_at = Column(DateTime(timezone=True), nullable=True)
+    seats_required = Column(Integer, nullable=False, default=1)
+    search_expires_at = Column(DateTime(timezone=True), nullable=True)
     
     # Estimates
     estimated_duration = Column(Integer, nullable=True)  # minutes
@@ -169,7 +188,7 @@ class Ride(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Additional metadata
-    metadata = Column(JSON, nullable=True)
+    extra_metadata = Column("metadata", JSON, nullable=True)
     
     # Relationships
     driver = relationship("User", back_populates="rides_as_driver", foreign_keys=[driver_id])
@@ -245,7 +264,7 @@ class MidRouteRequest(Base):
     expires_at = Column(DateTime(timezone=True), nullable=True)
     
     # Additional metadata
-    metadata = Column(JSON, nullable=True)
+    extra_metadata = Column("metadata", JSON, nullable=True)
     
     # Relationships
     ride = relationship("Ride", back_populates="mid_route_requests")
@@ -297,7 +316,7 @@ class Telemetry(Base):
     speeding = Column(Integer, default=0)
     
     # Additional metadata
-    metadata = Column(JSON, nullable=True)
+    extra_metadata = Column("metadata", JSON, nullable=True)
     
     # Relationships
     ride = relationship("Ride", back_populates="telemetry_data")
@@ -371,15 +390,172 @@ class OtpLog(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     phone = Column(String(20), nullable=False, index=True)
-    otp = Column(String(6), nullable=False)
+    otp = Column(String(6), nullable=True)
+    otp_hash = Column(String(64), nullable=True)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    verify_attempts = Column(Integer, default=0, nullable=False)
+    request_ip = Column(String(64), nullable=True)
     delivery_method = Column(String(20), nullable=False)  # sms/fcm/push
     delivery_status = Column(String(20), default="pending")  # pending/sent/failed
     attempt_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_active_otp_phone",
+            "phone",
+            unique=True,
+            postgresql_where=text("consumed_at IS NULL AND otp_hash IS NOT NULL"),
+            sqlite_where=text("consumed_at IS NULL AND otp_hash IS NOT NULL"),
+        ),
+    )
     
     def __repr__(self):
-        return f"<OtpLog(id={self.id}, phone={self.phone}, status={self.delivery_status})>"
+        return f"<OtpLog(id={self.id}, status={self.delivery_status})>"
+
+
+class SeatReservation(Base):
+    __tablename__ = "seat_reservations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ride_id = Column(Integer, ForeignKey("rides.id", ondelete="RESTRICT"), nullable=False)
+    driver_profile_id = Column(Integer, ForeignKey("driver_profiles.id", ondelete="RESTRICT"), nullable=False)
+    seats_held = Column(Integer, nullable=False, default=1)
+    status = Column(String(16), nullable=False, default="held")
+    reason = Column(String(32), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint("seats_held > 0", name="ck_seat_reservations_positive"),
+        Index(
+            "uq_active_reservation_driver",
+            "driver_profile_id",
+            unique=True,
+            postgresql_where=text("status IN ('held', 'confirmed')"),
+            sqlite_where=text("status IN ('held', 'confirmed')"),
+        ),
+    )
+
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    route = Column(String(120), nullable=False)
+    key = Column(String(128), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="in_flight")
+    response_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "route", "key", name="uq_idempotency_user_route_key"),
+    )
+
+
+class RateLimitBucket(Base):
+    __tablename__ = "rate_limit_buckets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bucket_key = Column(String(160), unique=True, nullable=False)
+    window_started_at = Column(DateTime(timezone=True), nullable=False)
+    request_count = Column(Integer, nullable=False, default=0)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+
+
+class DriverLicence(Base):
+    __tablename__ = "driver_licences"
+
+    id = Column(Integer, primary_key=True, index=True)
+    driver_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    licence_number_enc = Column(Text, nullable=False)
+    licence_number_hmac = Column(String(64), unique=True, nullable=False)
+    licence_last4 = Column(String(4), nullable=False)
+    holder_name_enc = Column(Text, nullable=False)
+    dob_enc = Column(Text, nullable=False)
+    vehicle_classes = Column(JSON, nullable=False, default=list)
+    transport_endorsement = Column(Boolean, nullable=False, default=False)
+    issue_date = Column(Date, nullable=True)
+    expiry_date = Column(Date, nullable=False)
+    status = Column(String(16), nullable=False, default="pending")
+    verification_source = Column(String(32), nullable=True)
+    verification_reference = Column(String(255), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    next_revalidation_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class BiometricConsent(Base):
+    __tablename__ = "biometric_consents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    driver_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    consent_text_version = Column(String(64), nullable=False)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class FaceTemplate(Base):
+    __tablename__ = "face_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    driver_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    encrypted_embedding = Column(LargeBinary, nullable=False)
+    model_version = Column(String(64), nullable=False)
+    enrollment_score = Column(Float, nullable=True)
+    status = Column(String(24), nullable=False, default="pending_review")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class VerificationAttempt(Base):
+    __tablename__ = "verification_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ride_id = Column(Integer, ForeignKey("rides.id", ondelete="RESTRICT"), nullable=False, index=True)
+    driver_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    face_template_id = Column(Integer, ForeignKey("face_templates.id", ondelete="RESTRICT"), nullable=False)
+    nonce_hash = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    liveness_passed = Column(Boolean, nullable=False, default=False)
+    match_score = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class VerificationAuditLog(Base):
+    __tablename__ = "verification_audit_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    driver_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    ride_id = Column(Integer, ForeignKey("rides.id", ondelete="SET NULL"), nullable=True, index=True)
+    action = Column(String(64), nullable=False)
+    outcome = Column(String(32), nullable=False)
+    reason_code = Column(String(64), nullable=True)
+    detail = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MigrationRun(Base):
+    __tablename__ = "migration_runs"
+
+    id = Column(String(36), primary_key=True)
+    status = Column(String(16), nullable=False)
+    source_fingerprint = Column(String(64), nullable=True)
+    row_counts = Column(JSON, nullable=True)
+    started_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class ConsensusVote(Base):
@@ -481,7 +657,7 @@ class EmergencyIncident(Base):
     severity = Column(String(20), nullable=False)
     location = Column(Geometry('POINT', srid=4326), nullable=False)
     description = Column(Text, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    extra_metadata = Column("metadata", JSON, nullable=True)
     resolved = Column(Boolean, default=False)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -553,7 +729,8 @@ class DriverProfile(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-    license_number = Column(String(50), nullable=False)
+    license_number = Column(String(512), nullable=True)
+    license_number_last4 = Column(String(4), nullable=True)
     license_expiry = Column(Date, nullable=False)
     vehicle_type = Column(String(20), nullable=False)
     vehicle_number = Column(String(20), unique=True, nullable=False)
@@ -571,6 +748,10 @@ class DriverProfile(Base):
     last_location_update = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    @property
+    def masked_license_number(self) -> str:
+        return f"****{self.license_number_last4}" if self.license_number_last4 else "unavailable"
     
     def __repr__(self):
         return f"<DriverProfile(id={self.id}, user_id={self.user_id}, vehicle_number={self.vehicle_number})>"

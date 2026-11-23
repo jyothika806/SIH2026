@@ -11,11 +11,12 @@ Author: OptimalRide Backend Team
 Date: 2026-09-27
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from typing import Optional, Literal
 from datetime import datetime, timedelta
 import jwt
@@ -23,9 +24,13 @@ from passlib.context import CryptContext
 
 from backend.app.api.v1.core.database import get_db
 from backend.app.api.v1.core.config import get_settings
-from backend.app.db.models import User, UserRole
+from backend.app.db.models import OtpLog, User, UserRole
 from backend.app.services.sms_service import sms_service
 from backend.app.services.notification import notification_manager
+from backend.app.services.otp_service import generate_otp, hash_otp, mask_phone, verify_otp as verify_otp_hash
+from backend.app.services.rate_limiter import consume_rate_limit, set_lockout
+from backend.app.services.utc_time import utc_now
+from backend.app.services.phone_numbers import normalize_phone
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -58,7 +63,7 @@ class UserLogin(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     
     phone: str = Field(..., min_length=10, max_length=20, description="Phone number")
-    role: Literal["passenger", "driver"] = Field(..., description="User role")
+    role: Literal["passenger", "driver", "admin"] = Field(..., description="User role")
 
 
 class OTPRequest(BaseModel):
@@ -77,7 +82,7 @@ class OTPVerification(BaseModel):
     
     phone: str = Field(..., min_length=10, max_length=20, description="Phone number")
     otp: str = Field(..., min_length=6, max_length=6, description="OTP code")
-    role: Literal["passenger", "driver"] = Field(..., description="User role")
+    role: Literal["passenger", "driver", "admin"] = Field(..., description="User role")
 
 
 class TokenResponse(BaseModel):
@@ -123,13 +128,19 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode = data.copy()
     
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = utc_now() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(
+        expire = utc_now() + timedelta(
             minutes=settings.jwt_access_token_expire_minutes
         )
     
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update({
+        "exp": expire,
+        "iat": utc_now(),
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience,
+        "type": "access",
+    })
     
     encoded_jwt = jwt.encode(
         to_encode,
@@ -152,8 +163,14 @@ def create_refresh_token(data: dict) -> str:
     """
     to_encode = data.copy()
     
-    expire = datetime.utcnow() + timedelta(days=settings.jwt_refresh_token_expire_days)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    expire = utc_now() + timedelta(days=settings.jwt_refresh_token_expire_days)
+    to_encode.update({
+        "exp": expire,
+        "iat": utc_now(),
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience,
+        "type": "refresh",
+    })
     
     encoded_jwt = jwt.encode(
         to_encode,
@@ -182,7 +199,10 @@ def verify_token(token: str, token_type: str = "access") -> dict:
         payload = jwt.decode(
             token,
             settings.jwt_secret_key,
-            algorithms=[settings.jwt_algorithm]
+            algorithms=[settings.jwt_algorithm],
+            issuer=settings.jwt_issuer,
+            audience=settings.jwt_audience,
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "type"]},
         )
         
         # Verify token type
@@ -242,9 +262,11 @@ async def get_user_by_phone(
     Returns:
         User object or None
     """
-    result = await db.execute(
-        select(User).where(User.phone == phone)
-    )
+    try:
+        normalized_phone = normalize_phone(phone, settings.phone_default_region)
+    except ValueError:
+        return None
+    result = await db.execute(select(User).where(User.phone == normalized_phone))
     return result.scalar_one_or_none()
 
 
@@ -304,8 +326,15 @@ async def register_user(
         Created user information
     """
     try:
-        # Check if user already exists
-        existing_user = await get_user_by_phone(db, user_data.phone)
+        try:
+            phone = normalize_phone(
+                user_data.phone, settings.phone_default_region
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        # Admin accounts are provisioned outside public registration.
+        existing_user = await get_user_by_phone(db, phone)
         
         if existing_user:
             raise HTTPException(
@@ -316,7 +345,7 @@ async def register_user(
         # Create new user
         user = await create_user(
             db,
-            user_data.phone,
+            phone,
             UserRole(user_data.role),
             user_data.age,
             user_data.gender,
@@ -345,6 +374,7 @@ async def register_user(
 @router.post("/request-otp")
 async def request_otp(
     otp_request: OTPRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -360,39 +390,103 @@ async def request_otp(
         OTP delivery status
     """
     try:
-        # Check if user exists
-        user = await get_user_by_phone(db, otp_request.phone)
-        
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found. Please register first."
+        try:
+            phone = normalize_phone(
+                otp_request.phone, settings.phone_default_region
             )
-        
-        # Send OTP
-        if otp_request.delivery_method == "sms":
-            result = await sms_service.send_otp(otp_request.phone, user.id)
-        elif otp_request.delivery_method == "fcm" and user.fcm_token:
-            # In production, send via FCM
-            result = await sms_service.send_otp(otp_request.phone, user.id)
-        else:
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        phone_retry = await consume_rate_limit(
+            db, "request-phone", phone, settings.otp_requests_per_phone,
+            settings.otp_rate_window_seconds,
+        )
+        ip_retry = await consume_rate_limit(
+            db, "request-ip", request.client.host if request.client else "unknown",
+            settings.otp_requests_per_ip, settings.otp_rate_window_seconds,
+        )
+        if phone_retry or ip_retry:
+            retry_after = max(phone_retry or 0, ip_retry or 0)
+            await db.commit()
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid delivery method or FCM token not available"
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many OTP requests",
+                headers={"Retry-After": str(retry_after)},
             )
-        
+
+        user = await db.scalar(
+            select(User).where(User.phone == phone).with_for_update()
+        )
+        if not user or not user.is_active:
+            return {
+                "message": "If the account is eligible, an OTP has been sent",
+                "expires_in_minutes": settings.otp_expire_minutes,
+            }
+
+        if otp_request.delivery_method not in {"sms", "fcm"}:
+            raise HTTPException(status_code=400, detail="Invalid delivery method")
+        if settings.environment.lower() == "production" and settings.dev_otp_code:
+            raise HTTPException(status_code=503, detail="OTP provider is not configured safely")
+
+        code = settings.dev_otp_code if settings.environment.lower() in {"development", "test"} and settings.dev_otp_code else generate_otp()
+        now = utc_now()
+        expires_at = now + timedelta(minutes=settings.otp_expire_minutes)
+        previous = await db.execute(
+            select(OtpLog).where(
+                OtpLog.phone == phone,
+                OtpLog.consumed_at.is_(None),
+            ).with_for_update()
+        )
+        for old_log in previous.scalars():
+            old_log.otp_hash = None
+            old_log.otp = None
+            old_log.consumed_at = now
+
+        record = OtpLog(
+            phone=phone,
+            otp=None,
+            otp_hash=hash_otp(code, "login", phone),
+            delivery_method="sms",
+            delivery_status="pending",
+            created_at=now,
+            expires_at=expires_at,
+            request_ip=request.client.host if request.client else None,
+        )
+        db.add(record)
+        try:
+            await db.flush()
+        except IntegrityError as error:
+            await db.rollback()
+            constraint_name = getattr(
+                getattr(error.orig, "diag", None), "constraint_name", None
+            )
+            if constraint_name == "uq_active_otp_phone":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="An OTP request is already in progress",
+                ) from error
+            raise
+
+        if settings.environment.lower() not in {"development", "test"} or not settings.dev_otp_code:
+            result = await sms_service.send_otp(phone, code, user.id)
+            if not result.get("success"):
+                record.otp_hash = None
+                record.consumed_at = now
+                await db.commit()
+                raise HTTPException(status_code=503, detail="OTP delivery is unavailable")
+            record.delivery_status = "sent"
+
         return {
-            "success": result.get("success", False),
-            "message": "OTP sent successfully" if result.get("success") else "Failed to send OTP",
+            "message": "If the account is eligible, an OTP has been sent",
             "expires_in_minutes": settings.otp_expire_minutes
         }
         
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OTP request failed: {str(e)}"
+            detail="OTP request failed"
         )
 
 
@@ -412,29 +506,64 @@ async def verify_otp(
         JWT access and refresh tokens
     """
     try:
-        # Get user
-        user = await get_user_by_phone(db, otp_data.phone)
-        
-        if not user:
+        try:
+            phone = normalize_phone(otp_data.phone, settings.phone_default_region)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        phone_retry = await consume_rate_limit(
+            db, "verify-phone", phone, settings.otp_verify_attempts_per_phone,
+            settings.otp_rate_window_seconds,
+        )
+        if phone_retry:
+            await db.commit()
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many OTP attempts",
+                headers={"Retry-After": str(phone_retry)},
             )
-        
-        # Verify role matches
+
+        user = await get_user_by_phone(db, phone)
+        if not user or not user.is_active:
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+
+        record = await db.scalar(
+            select(OtpLog)
+            .where(
+                OtpLog.phone == phone,
+                OtpLog.consumed_at.is_(None),
+                OtpLog.expires_at > utc_now(),
+                OtpLog.otp_hash.is_not(None),
+            )
+            .order_by(OtpLog.created_at.desc())
+            .with_for_update()
+        )
+        if (
+            record is None
+            or record.verify_attempts >= settings.otp_verify_attempts_per_phone
+        ):
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+        if not verify_otp_hash(otp_data.otp, record.otp_hash, "login", phone):
+            record.verify_attempts += 1
+            if record.verify_attempts >= settings.otp_verify_attempts_per_phone:
+                record.otp_hash = None
+                record.otp = None
+                record.consumed_at = utc_now()
+                await set_lockout(
+                    db, "verify-phone", phone, settings.otp_lockout_seconds
+                )
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid or expired OTP")
         if user.role.value != otp_data.role:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Role mismatch"
-            )
-        
-        # In production, verify against stored OTP
-        # For now, accept any 6-digit OTP
-        if len(otp_data.otp) != 6 or not otp_data.otp.isdigit():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid OTP format"
-            )
+            record.verify_attempts += 1
+            await db.commit()
+            raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+
+        record.consumed_at = utc_now()
+        record.otp_hash = None
+        record.otp = None
         
         # Generate tokens
         token_data = {
@@ -463,10 +592,10 @@ async def verify_otp(
         
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OTP verification failed: {str(e)}"
+            detail="OTP verification failed"
         )
 
 
@@ -558,10 +687,10 @@ async def get_current_user_info(
         )
         user = result.scalar_one_or_none()
         
-        if not user:
+        if not user or not user.is_active:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account is unavailable"
             )
         
         return UserResponse(

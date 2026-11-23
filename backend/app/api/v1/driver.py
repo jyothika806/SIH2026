@@ -12,16 +12,28 @@ Endpoints:
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, and_
+from sqlalchemy import select, update, and_, or_
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date
 from enum import Enum
 
-from backend.app.api.v1.core.security import get_current_user
+from backend.app.api.core.security import AuthenticatedPrincipal, get_authenticated_principal
 from backend.app.api.v1.core.database import get_db
-from backend.app.db.models import User, DriverProfile, DocumentVerification
+from backend.app.db.models import (
+    BiometricConsent,
+    DriverProfile,
+    DocumentVerification,
+    FaceTemplate,
+    Ride,
+    User,
+    VerificationAttempt,
+    VerificationAuditLog,
+)
 from backend.app.api.v1.core.config import Settings
+from backend.app.services.biometric_crypto import encrypt_text
+from backend.app.services.verification_service import driver_eligibility
+from backend.app.services.utc_time import utc_now
 
 router = APIRouter(prefix="/driver", tags=["driver"])
 
@@ -52,7 +64,7 @@ class DriverProfileCreate(BaseModel):
 class DriverProfileResponse(BaseModel):
     id: int
     user_id: int
-    license_number: str
+    license_number: str = Field(validation_alias="masked_license_number")
     license_expiry: date
     vehicle_type: str
     vehicle_number: str
@@ -87,10 +99,90 @@ class LocationUpdate(BaseModel):
     longitude: float = Field(..., ge=-180, le=180)
 
 
+class BiometricConsentRequest(BaseModel):
+    granted: bool
+    consent_text_version: str = Field(..., min_length=1, max_length=64)
+
+
+@router.post("/biometric-consent")
+async def record_biometric_consent(
+    request: BiometricConsentRequest,
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user.role != "driver":
+        raise HTTPException(status_code=403, detail="Only drivers can manage consent")
+    driver_id = current_user.user_id
+    now = utc_now()
+    existing = await db.scalars(
+        select(BiometricConsent).where(
+            BiometricConsent.driver_id == driver_id,
+            BiometricConsent.revoked_at.is_(None),
+        ).with_for_update()
+    )
+    for consent in existing:
+        consent.revoked_at = now
+    if not request.granted:
+        await db.execute(
+            update(VerificationAttempt)
+            .where(
+                VerificationAttempt.driver_id == driver_id,
+                VerificationAttempt.status.in_(("pending", "success")),
+            )
+            .values(status="cancelled_consent_revoked")
+        )
+        await db.execute(
+            update(Ride)
+            .where(
+                Ride.driver_id == driver_id,
+                or_(
+                    Ride.otp.is_not(None),
+                    Ride.otp_hash.is_not(None),
+                    Ride.otp_unlocked.is_(True),
+                ),
+            )
+            .values(
+                otp=None,
+                otp_hash=None,
+                otp_unlocked=False,
+                otp_expires_at=None,
+                otp_consumed_at=now,
+            )
+        )
+        await db.execute(
+            update(FaceTemplate)
+            .where(
+                FaceTemplate.driver_id == driver_id,
+                FaceTemplate.status == "active",
+            )
+            .values(status="revoked_consent")
+        )
+    if request.granted:
+        db.add(
+            BiometricConsent(
+                driver_id=driver_id,
+                consent_text_version=request.consent_text_version,
+                granted_at=now,
+            )
+        )
+    db.add(
+        VerificationAuditLog(
+            actor_id=driver_id,
+            driver_id=driver_id,
+            action="biometric_consent",
+            outcome="granted" if request.granted else "revoked",
+            reason_code="driver_choice",
+            detail={"consent_text_version": request.consent_text_version},
+        )
+    )
+    await db.flush()
+    return {"granted": request.granted, "recorded_at": now}
+
+
 @router.post("/profile", response_model=DriverProfileResponse, status_code=status.HTTP_201_CREATED)
 async def create_driver_profile(
     profile_data: DriverProfileCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -98,13 +190,13 @@ async def create_driver_profile(
     
     Requires the user to be authenticated with role 'driver'.
     """
-    if current_user.get('role') != 'driver':
+    if current_user.role != 'driver':
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only drivers can create driver profiles"
         )
     
-    user_id = current_user.get('id')
+    user_id = current_user.user_id
     
     # Check if profile already exists
     existing_profile = await db.execute(
@@ -119,7 +211,8 @@ async def create_driver_profile(
     # Create driver profile
     driver_profile = DriverProfile(
         user_id=user_id,
-        license_number=profile_data.license_number,
+        license_number=encrypt_text(profile_data.license_number),
+        license_number_last4=profile_data.license_number[-4:],
         license_expiry=profile_data.license_expiry,
         vehicle_type=profile_data.vehicle_type,
         vehicle_number=profile_data.vehicle_number,
@@ -138,13 +231,13 @@ async def create_driver_profile(
 
 @router.get("/profile", response_model=DriverProfileResponse)
 async def get_driver_profile(
-    current_user: dict = Depends(get_current_user),
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Get the current driver's profile.
     """
-    user_id = current_user.get('id')
+    user_id = current_user.user_id
     
     driver_profile = await db.execute(
         select(DriverProfile).where(DriverProfile.user_id == user_id)
@@ -164,7 +257,7 @@ async def get_driver_profile(
 async def upload_document(
     document_type: DocumentType,
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -172,13 +265,13 @@ async def upload_document(
     
     Supported document types: license, vehicle_rc, insurance, aadhar
     """
-    if current_user.get('role') != 'driver':
+    if current_user.role != 'driver':
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only drivers can upload documents"
         )
     
-    user_id = current_user.get('id')
+    user_id = current_user.user_id
     
     # In production, upload to S3/Cloud Storage and generate URL
     # For now, use a placeholder URL
@@ -207,13 +300,13 @@ async def upload_document(
 
 @router.get("/documents")
 async def get_documents(
-    current_user: dict = Depends(get_current_user),
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Get all documents uploaded by the current driver.
     """
-    user_id = current_user.get('id')
+    user_id = current_user.user_id
     
     documents = await db.execute(
         select(DocumentVerification).where(DocumentVerification.user_id == user_id)
@@ -237,19 +330,19 @@ async def get_documents(
 @router.post("/location")
 async def update_driver_location(
     location: LocationUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Update driver's current location.
     """
-    if current_user.get('role') != 'driver':
+    if current_user.role != 'driver':
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only drivers can update location"
         )
     
-    user_id = current_user.get('id')
+    user_id = current_user.user_id
     
     # Update driver profile location
     from sqlalchemy import func
@@ -274,19 +367,19 @@ async def update_driver_location(
 @router.post("/online")
 async def toggle_online_status(
     is_online: bool,
-    current_user: dict = Depends(get_current_user),
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Toggle driver's online status.
     """
-    if current_user.get('role') != 'driver':
+    if current_user.role != 'driver':
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only drivers can toggle online status"
         )
     
-    user_id = current_user.get('id')
+    user_id = current_user.user_id
     
     # Check if profile exists and is verified
     profile = await db.execute(
@@ -300,10 +393,16 @@ async def toggle_online_status(
             detail="Driver profile not found"
         )
     
-    if not driver_profile.is_verified:
+    if is_online:
+        eligible, reasons, _ = await driver_eligibility(
+            db, user_id, require_online=False
+        )
+    else:
+        eligible, reasons = True, []
+    if not eligible:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Driver profile must be verified to go online"
+            detail={"message": "Driver verification is incomplete", "pending_checks": reasons}
         )
     
     # Update online status

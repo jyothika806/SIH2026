@@ -7,11 +7,10 @@ import {
   pendingWaypoint,
   setDriverStatus,
   setVacantSeats,
-  startRide,
   streamDriverLocation,
   triggerSos,
-  verifyDriverIdentity,
 } from '../engine/commuteEngine';
+import { authenticatedFetch } from './authenticatedFetch';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -27,6 +26,20 @@ async function postGateway(endpoint: string, body: unknown) {
   } catch {
     /* FastAPI optional */
   }
+}
+
+async function requestGateway(endpoint: string, body: unknown) {
+  const response = await authenticatedFetch(`${API_BASE_URL}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    const detail = payload.detail;
+    throw new Error(typeof detail === 'string' ? detail : 'Backend verification is unavailable');
+  }
+  return payload;
 }
 
 class DriverApi {
@@ -48,15 +61,29 @@ class DriverApi {
   }
 
   async verifyIdentity(payload: {
+    rideId: string;
     driverId: string;
     verificationMethod: 'facial' | 'biometric' | 'pin';
     facialData?: string;
     biometricData?: string;
     pin?: string;
   }) {
-    const local = verifyDriverIdentity(payload.verificationMethod);
-    void postGateway('/api/v1/driver/verify-identity', payload);
-    return local;
+    try {
+      await requestGateway('/api/v1/liveness/request-verification', {
+        ride_id: Number(payload.rideId),
+      });
+      return {
+        success: false,
+        verified: false,
+        error: 'The backend did not confirm driver identity; OTP remains locked.',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        verified: false,
+        error: error instanceof Error ? error.message : 'Driver verification failed',
+      };
+    }
   }
 
   async acceptWaypoint(payload: { requestId: string; rideId: string; driverId: string }) {
@@ -79,9 +106,24 @@ class DriverApi {
   }
 
   async startRide(payload: { rideId: string; driverId: string; otp: string; currentLocation: GeoLocation }) {
-    const local = startRide(payload.otp);
-    void postGateway('/api/v1/driver/start-ride', payload);
-    return local;
+    try {
+      const result = await requestGateway(
+        `/api/v1/rides/${encodeURIComponent(payload.rideId)}/start`,
+        { otp: payload.otp },
+      );
+      return {
+        success: result.status === 'in_progress',
+        rideStarted: result.status === 'in_progress',
+        message: result.status === 'in_progress' ? 'Trip started' : undefined,
+        error: result.status === 'in_progress' ? undefined : 'Backend did not start the ride',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        rideStarted: false,
+        error: error instanceof Error ? error.message : 'Ride start failed',
+      };
+    }
   }
 
   async completeTrip(rideId: string) {

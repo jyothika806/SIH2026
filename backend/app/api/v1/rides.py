@@ -12,27 +12,38 @@ Author: OptimalRide Backend Team
 Date: 2026-09-27
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, status, Depends, Header, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from sqlalchemy.sql import text
 from typing import Optional, List, Literal, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import asyncio
 
 from backend.app.api.v1.core.database import get_db
 from backend.app.api.v1.core.config import get_settings
 from backend.app.db.models import (
-    User, Ride, MidRouteRequest, UserRole, VehicleType,
+    BiometricConsent, User, Ride, MidRouteRequest, UserRole, VehicleType,
     RideStatus, MidRouteStatus
 )
 from backend.app.db.spatial_queries import spatial_service
 from backend.app.services.matching_service import matching_service
 from backend.app.services.notification import notification_manager, NotificationType
 from backend.app.api.v1.auth import get_current_user
+from backend.app.api.core.security import AuthenticatedPrincipal, get_authenticated_principal
+from backend.app.services.otp_service import verify_otp as verify_otp_hash
+from backend.app.services.verification_service import (
+    driver_eligibility,
+    latest_valid_verification_attempt,
+)
+from backend.app.services.idempotency import (
+    claim_idempotency,
+    complete_idempotency,
+)
+from backend.app.services.utc_time import utc_now
 
 router = APIRouter(prefix="/rides", tags=["Rides"])
 
@@ -159,10 +170,77 @@ class TelemetryUpdate(BaseModel):
     battery_level: Optional[int] = Field(None, description="Battery level percentage")
 
 
+class RideStartRequest(BaseModel):
+    otp: str = Field(..., min_length=6, max_length=6, pattern="^[0-9]{6}$")
+
+
 # API Endpoints
+@router.post("/{ride_id}/start")
+async def start_ride(
+    ride_id: int,
+    request: RideStartRequest,
+    current_user: AuthenticatedPrincipal = Depends(get_authenticated_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    driver_id = current_user.user_id
+    now = utc_now()
+    if current_user.role != "driver":
+        raise HTTPException(status_code=403, detail="Only the assigned driver can start a ride")
+    consent_exists = await db.scalar(
+        select(BiometricConsent.id)
+        .where(
+            BiometricConsent.driver_id == driver_id,
+            BiometricConsent.revoked_at.is_(None),
+        )
+        .with_for_update()
+        .limit(1)
+    )
+    if consent_exists is None:
+        raise HTTPException(status_code=403, detail="Driver biometric consent is unavailable")
+    ride = await db.scalar(
+        select(Ride)
+        .where(Ride.id == ride_id)
+        .with_for_update()
+    )
+    if ride is None or ride.driver_id != driver_id:
+        raise HTTPException(status_code=404, detail="Assigned ride not found")
+    if ride.status != RideStatus.ARRIVED:
+        raise HTTPException(status_code=409, detail="Ride is not ready to start")
+    eligible, reasons, _ = await driver_eligibility(
+        db, driver_id, ride.vehicle_type.value, require_online=False
+    )
+    if not eligible:
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "Driver eligibility checks are incomplete", "pending_checks": reasons},
+        )
+    if (
+        not ride.otp_unlocked
+        or not ride.otp_hash
+        or ride.otp_expires_at is None
+        or ride.otp_expires_at <= now
+        or ride.otp_consumed_at is not None
+    ):
+        raise HTTPException(status_code=403, detail="Ride OTP is unavailable or expired")
+    attempt = await latest_valid_verification_attempt(db, ride_id, driver_id)
+    if attempt is None:
+        raise HTTPException(status_code=403, detail="Driver identity verification is incomplete")
+    if not verify_otp_hash(request.otp, ride.otp_hash, "ride-start", str(ride.id)):
+        raise HTTPException(status_code=401, detail="Invalid ride OTP")
+    ride.status = RideStatus.IN_PROGRESS
+    ride.otp_consumed_at = now
+    ride.otp = None
+    ride.otp_hash = None
+    ride.otp_unlocked = False
+    ride.updated_at = now
+    await db.flush()
+    return {"ride_id": ride.id, "status": ride.status.value, "started_at": now}
+
+
 @router.post("/book", response_model=RideResponse, status_code=status.HTTP_201_CREATED)
 async def book_ride(
     ride_request: RideBookingRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -189,18 +267,34 @@ async def book_ride(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only passengers can book rides"
             )
+
+        route_name = "rides:mid-route" if ride_request.is_mid_route else "rides:book"
+        claim, cached_response = await claim_idempotency(
+            db,
+            user_id,
+            route_name,
+            idempotency_key,
+            ride_request.model_dump(mode="json"),
+        )
+        if cached_response is not None:
+            return RideResponse.model_validate(cached_response)
         
         if ride_request.is_mid_route:
             # Handle mid-route pickup request
-            return await handle_mid_route_request(
+            result = await handle_mid_route_request(
                 ride_request, user_id, db
             )
         else:
             # Handle initial ride booking
-            return await handle_initial_booking(
+            result = await handle_initial_booking(
                 ride_request, user_id, db
             )
-            
+        if claim is None:
+            raise RuntimeError("Idempotency claim was not created for a new booking")
+        complete_idempotency(claim, result.model_dump(mode="json"))
+        await db.flush()
+        return result
+
     except HTTPException:
         raise
     except Exception as e:
@@ -216,6 +310,12 @@ async def handle_initial_booking(
     db: AsyncSession
 ) -> RideResponse:
     """Handle initial ride booking."""
+    capacity = settings.vehicle_capacities.get(ride_request.vehicle_type)
+    if capacity is None or ride_request.seats_required > capacity:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Requested seats exceed the configured vehicle capacity",
+        )
     
     # Calculate route geometry using OSRM
     route_result = await matching_service.calculate_route_geometry(
@@ -233,16 +333,20 @@ async def handle_initial_booking(
         pickup_point=f"POINT({ride_request.pickup_lon} {ride_request.pickup_lat})",
         dropoff_point=f"POINT({ride_request.dropoff_lon} {ride_request.dropoff_lat})",
         route_geometry=f"LINESTRING({route_result['geometry']})",
-        seats_total=ride_request.seats_required,
-        seats_occupied=1,
+        seats_total=capacity,
+        seats_occupied=ride_request.seats_required,
         status=RideStatus.REQUESTED,
+        seats_required=ride_request.seats_required,
+        search_expires_at=utc_now() + timedelta(
+            seconds=settings.booking_search_timeout_seconds
+        ),
         estimated_duration=int(route_result['duration_minutes']),
         estimated_distance=int(route_result['distance_km'] * 1000),
         otp_unlocked=False
     )
     
     db.add(ride)
-    await db.commit()
+    await db.flush()
     await db.refresh(ride)
     
     # Find matching drivers using spatial queries
@@ -309,7 +413,7 @@ async def handle_mid_route_request(
     )
     
     db.add(mid_route_request)
-    await db.commit()
+    await db.flush()
     await db.refresh(mid_route_request)
     
     # Get ride and driver information

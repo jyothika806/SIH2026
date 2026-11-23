@@ -94,15 +94,25 @@ function load(): EngineState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return seedState();
-    return { ...seedState(), ...JSON.parse(raw) } as EngineState;
+    const state = { ...seedState(), ...JSON.parse(raw) } as EngineState;
+    state.driver.identityVerified = false;
+    if (state.activeRide) {
+      state.activeRide.identityVerified = false;
+      state.activeRide.otpLocked = true;
+      state.activeRide.otp = undefined;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return state;
   } catch {
     return seedState();
   }
 }
 
-function save(state: EngineState): EngineState {
+function save(state: EngineState, notifyListeners = true): EngineState {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  window.dispatchEvent(new CustomEvent('sih2026-engine-updated'));
+  if (notifyListeners) {
+    window.dispatchEvent(new CustomEvent('sih2026-engine-updated'));
+  }
   return state;
 }
 
@@ -281,7 +291,6 @@ export function bookRide(input: {
 function assignRide(state: EngineState, request: IncomingRideRequest) {
   const cfg = vehicleConfig(request.vehicleType);
   const open = clampOpenSeats(request.vehicleType, cfg.capacity - request.seatsRequired);
-  const otp = String(Math.floor(1000 + Math.random() * 9000));
   state.driver.vehicleType = request.vehicleType;
   state.profile.vehicleType = request.vehicleType;
   state.driver.identityVerified = false;
@@ -305,7 +314,7 @@ function assignRide(state: EngineState, request: IncomingRideRequest) {
     driver: { ...state.profile, currentLocation: { ...state.driver.location } },
     identityVerified: false,
     otpLocked: true,
-    otp,
+    otp: undefined,
     geofence: {
       active: true,
       radius: 220,
@@ -328,13 +337,13 @@ export function acceptIncomingRequest(requestId: string): EngineState {
 
 export function listActivePoolRides(): ActiveRideListing[] {
   const state = load();
-  if (!state.activeRide || !state.activeRide.driver) return [];
-  if (state.activeRide.vehicleType === 'bike') return [];
-  if (state.activeRide.openSeats < 1) return [];
-  if (state.activeRide.status !== 'trip_started' && state.activeRide.status !== 'driver_assigned') {
+  const ride = state.activeRide;
+  if (!ride || !ride.driver) return [];
+  if (ride.vehicleType === 'bike') return [];
+  if (ride.openSeats < 1) return [];
+  if (ride.status !== 'trip_started' && ride.status !== 'driver_assigned') {
     return [];
   }
-  const ride = state.activeRide;
   return [
     {
       rideId: ride.rideId,
@@ -437,34 +446,21 @@ export function acceptWaypoint(requestId: string) {
 }
 
 export function verifyDriverIdentity(method: 'facial' | 'biometric' | 'pin') {
-  const state = load();
-  state.driver.identityVerified = true;
-  if (state.activeRide) {
-    state.activeRide.identityVerified = true;
-    state.activeRide.otpLocked = false;
-  }
-  save(state);
   return {
-    success: true,
-    verified: true,
+    success: false,
+    verified: false,
     method,
-    otpUnlocked: state.activeRide?.otp ?? '4567',
-    message: 'Identity verified. Trip start OTP unlocked.',
+    message: 'Identity verification requires the authorized backend verifier; OTP remains locked.',
   };
 }
 
 export function startRide(otp: string) {
-  const state = load();
-  if (!state.activeRide) return { success: false, rideStarted: false, error: 'No active ride' };
-  if (state.activeRide.otpLocked) {
-    return { success: false, rideStarted: false, error: 'OTP locked until identity verification' };
-  }
-  if (otp !== state.activeRide.otp) {
-    return { success: false, rideStarted: false, error: 'Invalid OTP' };
-  }
-  state.activeRide.status = 'trip_started';
-  save(state);
-  return { success: true, rideStarted: true, message: 'Trip started' };
+  void otp;
+  return {
+    success: false,
+    rideStarted: false,
+    error: 'Ride start requires a successful backend verification and cannot run locally.',
+  };
 }
 
 export function completeRide() {
@@ -498,7 +494,7 @@ export function streamPassengerStatus(rideId: string, location: GeoLocation) {
   if (state.activeRide && state.activeRide.rideId === rideId) {
     state.activeRide.timestamp = new Date().toISOString();
   }
-  save(state);
+  save(state, false);
   return { success: true, rideId, location, message: 'Passenger status streamed' };
 }
 

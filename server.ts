@@ -13,6 +13,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import path from "path";
+import { fileURLToPath } from "node:url";
 import { v4 as uuidv4 } from "uuid";
 import { GoogleGenAI, Type } from "@google/genai";
 
@@ -138,7 +139,7 @@ if (!GEMINI_API_KEY) {
   console.warn("⚠️ [WARN] GEMINI_API_KEY is not defined. AI Proxy will run in Local Fallback mode.");
 }
 
-console.log(`🔗 [Microservices Gateway] FastAPI target configured at: ${FASTAPI_SERVICE_URL}`);
+console.log("[Microservices Gateway] FastAPI upstream configured.");
 
 const ai = new GoogleGenAI({
   apiKey: GEMINI_API_KEY || "dummy-key-for-initialization"
@@ -346,57 +347,6 @@ function generateFallbackIncidentTriage(payload: IncidentRequestBody): IncidentT
 // 5. STANDALONE FALLBACK MOCK HANDLERS FOR DRIVER & TRANSIT ECOSYSTEM
 // ============================================================================
 
-function handleMockDriverRegister(req: Request, res: Response) {
-  const body: DriverRegisterPayload = req.body;
-  const mockDriverId = `DRV-${new Date().getFullYear()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-
-  res.status(200).json({
-    status: "degraded_mock",
-    message: "FastAPI microservice offline. Profile registered in standalone fallback memory.",
-    verified: true,
-    driverId: mockDriverId,
-    driverName: body.driverName || "Alexis Carter (Verified Partner)",
-    licenseNumber: body.licenseNumber || "DL-9821-X44",
-    vehicle: {
-      type: body.vehicleType || "cab",
-      model: body.vehicleModel || "Toyota Camry Hybrid",
-      number: body.vehicleNumber || "NYC-T-88219",
-      color: body.vehicleColor || "Silver Metallic",
-      year: body.year || 2024,
-      verificationStatus: "VERIFIED"
-    },
-    livenessVerification: {
-      status: "PASSED",
-      confidence: 0.985,
-      method: "Passive 3D Facial Mesh Biometric Authenticator"
-    },
-    assignedCorridor: "Manhattan Midtown Safe Transit Line 1",
-    timestamp: new Date().toISOString()
-  });
-}
-
-function handleMockDriverStatus(req: Request, res: Response) {
-  res.status(200).json({
-    status: "degraded_mock",
-    message: "FastAPI microservice offline. Operating in standalone telemetry mode.",
-    driverId: "DRV-2026-X9481",
-    isOnline: true,
-    isAvailableForDispatch: true,
-    currentLocation: {
-      lat: 40.758,
-      lng: -73.9855,
-      address: "42nd St & Broadway, New York, NY",
-      heading: 42,
-      speedKmH: 26.4
-    },
-    safetyScore: 98,
-    biometricsVerified: true,
-    activeRidersCount: 1,
-    emergencyHotline: "+1 (800) 555-SAFE",
-    lastHeartbeat: new Date().toISOString()
-  });
-}
-
 function handleMockRideTrack(req: Request, res: Response) {
   const body: RideTrackPayload = req.body;
   const rideId = body.rideId || `RIDE-${new Date().getFullYear()}-TR882`;
@@ -414,7 +364,7 @@ function handleMockRideTrack(req: Request, res: Response) {
       phone: "+1 (555) 019-2831",
       rating: 4.96,
       vehicle: "NYC-T-88219 (Silver Camry Hybrid)",
-      livenessStatus: "VERIFIED_ACTIVE"
+      livenessStatus: "UNAVAILABLE"
     },
     passengerSafetyIndex: 96,
     telemetry: {
@@ -537,7 +487,6 @@ function handleSmartCommutationFallback(req: Request, res: Response, fullPath: s
       status: "driver_assigned",
       identityVerified: false,
       otpLocked: true,
-      otp: "4567",
       eta: 8,
       fare: 150,
       occupiedSeats: 1,
@@ -557,20 +506,12 @@ function handleSmartCommutationFallback(req: Request, res: Response, fullPath: s
     jsonOk(res, { vacantSeats: Number(body.vacantSeats ?? 2) });
     return true;
   }
-  if (fullPath.startsWith("/api/v1/driver/verify-identity") && method === "POST") {
-    jsonOk(res, { verified: true, otpUnlocked: "4567", message: "Identity verified" });
-    return true;
-  }
   if (fullPath.startsWith("/api/v1/driver/accept-waypoint") && method === "POST") {
     jsonOk(res, { extraFare: 48, detourMinutes: 2, message: "Waypoint accepted" });
     return true;
   }
   if (fullPath.startsWith("/api/v1/driver/location") && method === "POST") {
     jsonOk(res, { message: "Driver GPS streamed", location: body.location || body });
-    return true;
-  }
-  if (fullPath.startsWith("/api/v1/driver/start-ride") && method === "POST") {
-    jsonOk(res, { rideStarted: true });
     return true;
   }
   if (fullPath.startsWith("/api/v1/driver/complete") && method === "POST") {
@@ -619,6 +560,18 @@ function handleMockTransitSchedule(req: Request, res: Response) {
 async function proxyToFastAPI(req: Request, res: Response): Promise<void> {
   const targetUrl = `${FASTAPI_SERVICE_URL}${req.originalUrl}`;
   const method = req.method;
+  const fullPath = req.originalUrl.split("?")[0];
+  const isPath = (prefix: string) =>
+    fullPath === prefix || fullPath.startsWith(`${prefix}/`);
+  const securityCriticalPath = [
+    "/api/v1/auth",
+    "/api/v1/admin",
+    "/api/v1/liveness",
+    "/api/v1/driver",
+    "/api/v1/rides",
+    "/api/v1/dispatch",
+  ].some(isPath);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   try {
     const headers: Record<string, string> = {};
@@ -646,11 +599,12 @@ async function proxyToFastAPI(req: Request, res: Response): Promise<void> {
 
     // Attempt upstream connection with 5s timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    timeoutId = setTimeout(() => controller.abort(), 5000);
     fetchOptions.signal = controller.signal;
 
     const upstreamResponse = await fetch(targetUrl, fetchOptions);
     clearTimeout(timeoutId);
+    if (securityCriticalPath) res.setHeader("Cache-Control", "no-store");
 
     res.status(upstreamResponse.status);
     upstreamResponse.headers.forEach((val, key) => {
@@ -661,19 +615,18 @@ async function proxyToFastAPI(req: Request, res: Response): Promise<void> {
 
     const data = await upstreamResponse.text();
     res.send(data);
-  } catch (proxyError: any) {
-    console.warn(`⚠️ [Gateway Proxy] FastAPI microservice unreachable at ${targetUrl}. Route fallback engaged.`);
+  } catch {
+    if (timeoutId) clearTimeout(timeoutId);
+    console.warn("[Gateway Proxy] FastAPI unavailable; using configured route fallback.");
 
-    // Use req.originalUrl for path matching so /api/v1/* prefixes are preserved
-    const fullPath = req.originalUrl.split("?")[0]; // strip query params
-
-    if (fullPath.startsWith("/api/v1/driver/register") && method === "POST") {
-      handleMockDriverRegister(req, res);
-      return;
-    }
-
-    if (fullPath.startsWith("/api/v1/driver/status") && method === "GET") {
-      handleMockDriverStatus(req, res);
+    if (securityCriticalPath) {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      res.status(503).json({
+        success: false,
+        error: "Security service unavailable"
+      });
       return;
     }
 
@@ -705,8 +658,6 @@ async function proxyToFastAPI(req: Request, res: Response): Promise<void> {
     res.status(200).json({
       status: "degraded_mock",
       message: "FastAPI microservice unreachable. Running in standalone fallback mode.",
-      targetUrl,
-      error: proxyError?.message || "Connection refused",
       timestamp: new Date().toISOString()
     });
   }
@@ -731,7 +682,7 @@ app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Correlation-ID", "X-Request-ID"]
+    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "X-Correlation-ID", "X-Request-ID"]
   })
 );
 
@@ -754,7 +705,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader("X-Correlation-ID", correlationId);
   res.setHeader("X-Request-ID", requestId);
 
-  console.log(`→ [${correlationId}] ${req.method} ${req.originalUrl}`);
+  console.log(`→ [${correlationId}] ${req.method} ${req.path}`);
   next();
 });
 
@@ -772,7 +723,6 @@ app.get("/api/health", async (_req: Request, res: Response) => {
     status: "ok",
     hasApiKey: Boolean(GEMINI_API_KEY),
     fastApiConnected: fastApiHealthy,
-    fastApiTarget: FASTAPI_SERVICE_URL,
     timestamp: new Date().toISOString()
   });
 });
@@ -1038,7 +988,10 @@ app.post("/api/support/submit", (req: Request, res: Response) => {
 // ----------------------------------------------------------------------------
 // 5. Static Asset Hosting & SPA Catch-All
 // ----------------------------------------------------------------------------
-const distPath = path.resolve(__dirname, "../dist");
+const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
+const distPath = path.basename(serverDirectory) === "dist"
+  ? serverDirectory
+  : path.resolve(serverDirectory, "dist");
 app.use(express.static(distPath));
 
 app.get("*", (_req: Request, res: Response) => {
@@ -1060,13 +1013,13 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const correlationId = req.headers["x-correlation-id"] as string || "none";
   const status: number = typeof err.status === "number" ? err.status : 500;
 
-  console.error(`❌ [${correlationId}] Unhandled error on ${req.method} ${req.originalUrl}:`, err?.message || err);
+  console.error(`❌ [${correlationId}] Unhandled error on ${req.method} ${req.path}:`, err?.message || err);
 
   res.status(status).json({
     status: "error",
     message: err?.message || "Internal Server Error",
     correlationId,
-    path: req.originalUrl,
+    path: req.path,
     timestamp: new Date().toISOString()
   });
 });
@@ -1078,7 +1031,7 @@ if (process.env.NODE_ENV !== "test") {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 SafeVoyage Express Gateway running on http://0.0.0.0:${PORT}`);
     console.log(`🛡️  Helmet security headers: ACTIVE`);
-    console.log(`📡 Reverse Proxying /api/v1/{driver,passenger,transit,rides,auth,...} -> ${FASTAPI_SERVICE_URL}`);
+    console.log("📡 Reverse proxy routes: configured");
     console.log(`🔗 Correlation ID tracing: ACTIVE (X-Correlation-ID / X-Request-ID)`);
   });
 }

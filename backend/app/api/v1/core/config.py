@@ -13,10 +13,11 @@ Author: OptimalRide Backend Team
 Date: 2026-09-27
 """
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
 import os
+import secrets
 from functools import lru_cache
 
 
@@ -39,7 +40,7 @@ class Settings(BaseSettings):
     
     # Database Settings
     database_url: str = Field(
-        default="postgresql+asyncpg://postgres:JyothikA@localhost:5432/optimalride",
+        default="postgresql+asyncpg://localhost/optimalride",
         description="PostgreSQL database URL with asyncpg driver"
     )
     database_pool_size: int = 20
@@ -49,11 +50,13 @@ class Settings(BaseSettings):
     
     # JWT Settings
     jwt_secret_key: str = Field(
-        default="optimalride_super_secret_development_key_2026",
+        default_factory=lambda: os.getenv("JWT_SECRET_KEY") or secrets.token_urlsafe(32),
         description="Secret key for JWT token signing"
     )
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 30
+    jwt_issuer: str = "safevoyage-sentinel"
+    jwt_audience: str = "safevoyage-client"
+    jwt_access_token_expire_minutes: int = Field(default=15, gt=0, le=60)
     jwt_refresh_token_expire_days: int = 7
     
     # Firebase Cloud Messaging (FCM) Settings
@@ -83,6 +86,7 @@ class Settings(BaseSettings):
         None,
         description="Twilio phone number for SMS"
     )
+    test_sms_sink_url: Optional[str] = None
     
     # OSRM Route Server Settings
     osrm_server_url: str = Field(
@@ -97,6 +101,49 @@ class Settings(BaseSettings):
     max_seats_per_vehicle: int = 4
     ride_timeout_minutes: int = 15
     otp_expire_minutes: int = 5
+    otp_hmac_key: Optional[str] = None
+    licence_hmac_key: Optional[str] = None
+    dev_otp_code: Optional[str] = None
+    sms_provider: str = "twilio"
+    auto_create_schema: bool = False
+    booking_search_timeout_seconds: int = 900
+    seat_hold_ttl_seconds: int = 60
+    trip_otp_expire_minutes: int = 5
+    otp_requests_per_phone: int = 3
+    otp_requests_per_ip: int = 10
+    otp_verify_attempts_per_phone: int = 5
+    otp_rate_window_seconds: int = 600
+    otp_lockout_seconds: int = 900
+    rate_limit_bucket_retention_hours: int = 24
+    rate_limit_cleanup_interval_seconds: int = 3600
+    phone_default_region: str = "IN"
+    redis_url: Optional[str] = None
+    fernet_key: Optional[str] = None
+    licence_class_map: dict = Field(default_factory=lambda: {
+        "bike": ["MCWG"],
+        "auto": ["3W-T", "LMV-3W", "e-rickshaw"],
+        "cab": ["LMV-TR", "LMV"],
+    })
+    vehicle_capacities: dict = Field(default_factory=lambda: {
+        "bike": 1,
+        "auto": 3,
+        "cab": 4,
+    })
+    commercial_transport_endorsement_required: dict = Field(default_factory=lambda: {
+        "bike": True,
+        "auto": True,
+        "cab": True,
+    })
+    licence_revalidation_days: int = 180
+    biometric_retention_days: int = 365
+    face_enrollment_threshold: float = 0.363
+    face_ride_threshold: float = 0.363
+    face_model_dir: str = "ai_engine/models/face"
+    digilocker_client_id: Optional[str] = None
+    digilocker_client_secret: Optional[str] = None
+    digilocker_enabled: bool = False
+    licence_class_map_reviewed: bool = False
+    verification_region: str = "Karnataka"
     
     # Matching Settings
     matching_radius_meters: int = 2000
@@ -189,9 +236,33 @@ class Settings(BaseSettings):
     @classmethod
     def validate_database_url(cls, v):
         """Validate database URL format."""
-        if not v.startswith(("postgresql+asyncpg://", "postgresql://")):
-            raise ValueError("Database URL must use postgresql+asyncpg driver")
+        if not v.startswith(("postgresql+asyncpg://", "postgresql://", "sqlite+aiosqlite://")):
+            raise ValueError("Database URL must use postgresql+asyncpg or sqlite+aiosqlite")
         return v
+
+    @field_validator("jwt_issuer", "jwt_audience")
+    @classmethod
+    def validate_jwt_claim_configuration(cls, value):
+        if not value.strip():
+            raise ValueError("JWT issuer and audience must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_production_sms(self):
+        if self.dev_otp_code and self.environment.lower() not in {"development", "test"}:
+            raise ValueError("DEV_OTP_CODE is restricted to development and test")
+        if self.test_sms_sink_url and self.environment.lower() != "test":
+            raise ValueError("TEST_SMS_SINK_URL is restricted to the test environment")
+        if self.environment.lower() == "production":
+            if self.sms_provider.lower() != "twilio":
+                raise ValueError("Production requires the configured Twilio SMS provider")
+            if not all(
+                (self.twilio_account_sid, self.twilio_auth_token, self.twilio_phone_number)
+            ):
+                raise ValueError("Production requires complete Twilio SMS credentials")
+            if not self.otp_hmac_key:
+                raise ValueError("Production requires OTP_HMAC_KEY")
+        return self
     
     model_config = {
         "env_file": ".env",
@@ -221,7 +292,6 @@ if __name__ == "__main__":
     print("Testing Settings Configuration...")
     print(f"App Name: {settings.app_name}")
     print(f"Environment: {settings.environment}")
-    print(f"Database URL: {settings.database_url[:20]}...")
     print(f"OSRM Server: {settings.osrm_server_url}")
     print(f"Max Detour: {settings.max_detour_minutes} minutes")
     print("\nSettings loaded successfully!")

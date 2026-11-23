@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import { PassengerApp } from './components/passenger/PassengerApp';
 import { DriverApp } from './components/driver/DriverApp';
+import { RequireAuth } from './components/auth/RequireAuth';
 import { Navigation, Car, User } from 'lucide-react';
 import './index.css';
 
@@ -87,8 +88,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <Router>
       <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/passenger/*" element={<PassengerApp />} />
-        <Route path="/driver/*" element={<DriverApp />} />
+        <Route path="/passenger/*" element={<RequireAuth role="passenger"><PassengerApp /></RequireAuth>} />
+        <Route path="/driver/*" element={<RequireAuth role="driver"><DriverApp /></RequireAuth>} />
       </Routes>
     </Router>
   </React.StrictMode>,

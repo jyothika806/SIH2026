@@ -122,7 +122,7 @@ async def trigger_sos(
             location_lat=request.location_lat,
             location_lon=request.location_lon,
             description=request.description,
-            metadata=request.metadata
+            extra_metadata=request.metadata
         )
         
         return SOSTriggerResponse(
@@ -310,7 +310,7 @@ async def log_incident(
             location_lat=request.location_lat,
             location_lon=request.location_lon,
             description=request.description,
-            metadata=request.metadata
+            extra_metadata=request.metadata
         )
         
         return {
